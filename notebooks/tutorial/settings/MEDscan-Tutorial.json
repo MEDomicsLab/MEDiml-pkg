@@ -11,6 +11,7 @@
     "path_save_checks": ""
   },
   "n_batch": 16,
+  "categorize_features": true,
   "roi_type_labels": [
     "GTV"
   ],

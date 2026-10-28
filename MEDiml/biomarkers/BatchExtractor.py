@@ -23,6 +23,15 @@ from MEDiml.wrangling.DataManager import DataManager
 DEFAULT_ROI_TYPE = 'all'
 DEFAULT_ROI_TYPE_LABEL = 'ROI'
 
+# Feature families tags
+FEATURE_CATEGORIES = {
+    'morph': ('morph_3D',),
+    'int': ('locInt_3D', 'stats_3D', 'intHist_3D', 'intVolHist_3D', 'dose_3D'),
+    'text': ('glcm_3D', 'glrlm_3D', 'glszm_3D', 'gldzm_3D', 'ngtdm_3D', 'ngldm_3D'),
+}
+# Tag of the features matching none of the categories above.
+UNKNOWN_CATEGORY = 'unknown'
+
 
 class BatchExtractor(object):
     """
@@ -734,6 +743,66 @@ class BatchExtractor(object):
 
         return log_file
 
+    @staticmethod
+    def __save_categorized_tables(radiomics_table_dict: Dict, save_path: Path) -> Dict:
+        """
+        Splits a radiomics table into one table per feature category (see ``FEATURE_CATEGORIES``),
+        plus one for the features matching no category, and saves each of them as CSV and TXT
+        files next to the main table.
+
+        The category tag is appended to the image space of the table name, the ``image`` space being
+        replaced by it (e.g. radiomics__CT(GTV)__image -> radiomics__CT(GTV)__morph and
+        radiomics__CT(GTV)__Wavelet-db3-LLH -> radiomics__CT(GTV)__Wavelet-db3-LLH), so the
+        tables keep the ``radiomics__<scan>(<roi>)__<space>`` naming used by the learning module.
+        The features are renumbered from radVar1 in each category table.
+
+        Args:
+            radiomics_table_dict(Dict): Radiomics table, as created by ``MEDiml.utils.create_radiomics_table``.
+            save_path(Path): Path of the main radiomics table.
+
+        Returns:
+            Dict: The number of features of each category saved.
+        """
+        table = radiomics_table_dict['Table']
+        definitions = dict(
+            entry.split(':', 1)
+            for entry in radiomics_table_dict['Properties']['UserData'].split('||') if ':' in entry
+        )
+
+        # Columns of each category, in their original order
+        columns = {category: [] for category in [*FEATURE_CATEGORIES, UNKNOWN_CATEGORY]}
+        for var in table.columns:
+            # The full feature name starts with its family (e.g. morph_3D__Fmorph_vol__scale2)
+            family = definitions.get(var, '').split('__')[0]
+            category = next(
+                (c for c, families in FEATURE_CATEGORIES.items() if family.startswith(families)),
+                UNKNOWN_CATEGORY
+            )
+            columns[category].append(var)
+
+        head, _, im_space = save_path.stem.rpartition(')__')
+        n_features = {}
+        for category, variables in columns.items():
+            if not variables:
+                continue
+            new_names = ['radVar' + str(i + 1) for i in range(len(variables))]
+            space = category if im_space == 'image' else im_space + '_' + category
+            name_table = head + ')__' + space
+
+            # Same format as MEDiml.utils.write_radiomics_csv
+            table_category = table[variables].set_axis(new_names, axis=1).fillna(value='NaN').sort_index()
+            table_category.to_csv(save_path.parent / (name_table + '.csv'),
+                                  sep=',',
+                                  encoding='utf-8',
+                                  index=True,
+                                  index_label=radiomics_table_dict['Properties']['DimensionNames'][0])
+            with open(save_path.parent / (name_table + '.txt'), 'w') as fid:
+                fid.write('||' + ''.join(
+                    new + ':' + definitions.get(old, old) + '||' for new, old in zip(new_names, variables)))
+            n_features[category] = len(variables)
+
+        return n_features
+
     @ray.remote
     def __compute_radiomics_tables(
             self,
@@ -742,7 +811,9 @@ class BatchExtractor(object):
             im_params: Dict
         ) -> None:
         """
-        Creates radiomic tables off of the saved dicts with the computed features and save it as CSV files
+        Creates radiomic tables off of the saved dicts with the computed features and save it as CSV files.
+        Unless ``categorize_features`` is set to false in the parameters file, a copy of each table is also
+        saved for every feature category (morph, int, text and unknown), see ``__save_categorized_tables``.
 
         Args:
             table_tags(List): Lists of information about scans, roi type and imaging space (or filter space)
@@ -810,6 +881,11 @@ class BatchExtractor(object):
 
             # Create CSV table and Definitions
             MEDiml.utils.write_radiomics_csv(save_path)
+
+            # Create one CSV table and Definitions per feature category (morph, int, text, unknown)
+            if im_params.get('categorize_features', True):
+                n_features = self.__save_categorized_tables(radiomics_table_dict, save_path)
+                logging.info(f"Features per category: {n_features}")
 
             logging.info(f"DONE\nTime taken: {time() - start} seconds\n")
 
