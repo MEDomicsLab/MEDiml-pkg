@@ -263,7 +263,7 @@ devel = ["colorama", "jsonschema", "json-spec", "pylint", "pytest", "pytest-benc
 
 [[package]]
 name = "filelock"
-version = "3.8.0"
+version = "3.9.0"
 description = "A platform independent file lock."
 category = "main"
 optional = false
