@@ -4,8 +4,8 @@ Installation
 Python installation
 -------------------
 
-The MEDiml package requires python 3.8 or more to be run. If you don't have it installed on your machine, follow \
-the instructions `here <https://github.com/MEDomicsLab/MEDiml/blob/main/python.md>`__.
+The MEDiml package requires python 3.8, 3.9 or 3.10 to be run. If you don't have it installed on your machine, follow \
+the instructions `here <https://github.com/MEDomicsLab/MEDiml-pkg/blob/main/python.md>`__.
 
 Install via pip
 ---------------

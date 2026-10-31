@@ -6,7 +6,7 @@ authors = ["MEDomics Consortium <medomics.info@gmail.com>"]
 license = "GPL-3.0"
 readme = "README.md"
 homepage = "https://mediml.app/"
-repository = "https://github.com/MEDomicsLab/MEDiml/"
+repository = "https://github.com/MEDomicsLab/MEDiml-pkg/"
 documentation = "https://mediml.readthedocs.io/"
 keywords = ["python", "ibsi", "medical-imaging", 
             "cancer-imaging-research", "radiomics", 
@@ -15,10 +15,10 @@ keywords = ["python", "ibsi", "medical-imaging",
 packages = [ {include = "MEDiml"} ]
 
 [tool.poetry.urls]
-"Bug Tracker" = "https://github.com/MEDomicsLab/MEDiml/issues"
+"Bug Tracker" = "https://github.com/MEDomicsLab/MEDiml-pkg/issues"
 
 [tool.poetry.dependencies]
-python = ">=3.8.0,<=3.10"
+python = ">=3.8.0,<3.11"
 numpy = "*"
 isort = "*"
 ipykernel = "*"
