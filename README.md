@@ -1,13 +1,13 @@
 <div align="center">
 
-<img src="https://github.com/MEDomicsLab/MEDiml/blob/main/docs/figures/MEDimlLogo150.png?raw=true" style="width:150px;"/>
+<img src="https://github.com/MEDomicsLab/MEDiml-pkg/blob/main/docs/figures/MEDimlLogo150.png?raw=true" style="width:150px;"/>
 
 [![PyPI - Python Version](https://img.shields.io/badge/python-3.8%20|%203.9%20|%203.10-blue)](https://www.python.org/downloads/release/python-380/)
-[![PyPI - version](https://img.shields.io/badge/pypi-v0.11-blue)](https://pypi.org/project/mediml/)
-[![Continuous Integration](https://github.com/MEDomicsLab/MEDiml/actions/workflows/python-app.yml/badge.svg)](https://github.com/MEDomicsLab/MEDiml/actions/workflows/python-app.yml)
+[![PyPI - version](https://img.shields.io/pypi/v/mediml)](https://pypi.org/project/mediml/)
+[![Continuous Integration](https://github.com/MEDomicsLab/MEDiml-pkg/actions/workflows/python-app.yml/badge.svg)](https://github.com/MEDomicsLab/MEDiml-pkg/actions/workflows/python-app.yml)
 [![Documentation Status](https://readthedocs.org/projects/mediml/badge/?version=latest)](https://mediml.readthedocs.io/en/latest/?badge=latest)
 [![License: GPL-3](https://img.shields.io/badge/license-GPLv3-blue)](LICENSE)
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MEDomicsLab/MEDiml/blob/main/notebooks/tutorial/DataManager-Tutorial.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MEDomicsLab/MEDiml-pkg/blob/main/notebooks/tutorial/DataManager-Tutorial.ipynb)
 
 </div>
 
@@ -21,20 +21,22 @@
   * [5. IBSI Standardization](#5-ibsi-standardization)
     * [IBSI Chapter 1](#ibsi-chapter-1)
     * [IBSI Chapter 2](#ibsi-chapter-2)
-  * [6. Acknowledgement](#6-acknowledgement)
-  * [7. Authors](#7-authors)
-  * [8. Statement](#8-statement)
+  * [6. Contributing and support](#6-contributing-and-support)
+  * [7. Citation](#7-citation)
+  * [8. Acknowledgement](#8-acknowledgement)
+  * [9. Authors](#9-authors)
+  * [10. Statement](#10-statement)
 
 ## 1. Introduction
 MEDiml is an open-source Python package that can be used for processing multi-modal medical images (MRI, CT or PET) and for extracting their radiomic features. This package is meant to facilitate the processing of medical images and the subsequent computation of all types of radiomic features while maintaining the reproducibility of analyses. This package has been standardized with the [IBSI](https://theibsi.github.io/) norms.
 
-![MEDiml overview](https://raw.githubusercontent.com/MEDomicsLab/MEDiml/main/docs/figures/pakcage-overview.png)
+![MEDiml overview](https://raw.githubusercontent.com/MEDomicsLab/MEDiml-pkg/main/docs/figures/pakcage-overview.png)
 
 
 ## 2. Installation
 
 ### Python installation
-The MEDiml package requires *Python 3.8* or more. If you don't have it installed on your machine, follow the instructions [here](https://github.com/MEDomicsLab/MEDiml/blob/main/python.md) to install it.
+The MEDiml package requires *Python 3.8*, *3.9* or *3.10*. If you don't have it installed on your machine, follow the instructions [here](https://github.com/MEDomicsLab/MEDiml-pkg/blob/main/python.md) to install it.
 
 ### Package installation
 You can easily install the ``MEDiml`` package from PyPI using:
@@ -117,22 +119,22 @@ med_obj.save_radiomics(
 
 ## 4. Tutorials
 
-We have created many [tutorial notebooks](https://github.com/MEDomicsLab/MEDiml/tree/main/notebooks) to assist you in learning how to use the different parts of the package. More details can be found in the [documentation](https://mediml.readthedocs.io/en/latest/tutorials.html).
+We have created many [tutorial notebooks](https://github.com/MEDomicsLab/MEDiml-pkg/tree/main/notebooks) to assist you in learning how to use the different parts of the package. More details can be found in the [documentation](https://mediml.readthedocs.io/en/latest/tutorials.html).
 
 ## 5. IBSI Standardization
 The image biomarker standardization initiative ([IBSI](https://theibsi.github.io)) is an independent international collaboration that aims to standardize the extraction of image biomarkers from acquired imaging. The IBSI therefore seeks to provide image biomarker nomenclature and definitions, benchmark datasets, and benchmark values to verify image processing and image biomarker calculations, as well as reporting guidelines, for high-throughput image analysis. We participate in this collaboration with our package to make sure it respects international nomenclatures and definitions. The participation was separated into two chapters:
 
   - ### IBSI Chapter 1
-      [The IBSI chapter 1](https://theibsi.github.io/ibsi1/) is dedicated to the standardization of commonly used radiomic features. It was initiated in September 2016 and reached completion in March 2020. We have created two [jupyter notebooks](https://github.com/MEDomicsLab/MEDiml/tree/main/notebooks/ibsi) for each phase of the chapter and made them available for the users to run the IBSI tests for themselves. The tests can also be explored in interactive Colab notebooks that are directly accessible here:
+      [The IBSI chapter 1](https://theibsi.github.io/ibsi1/) is dedicated to the standardization of commonly used radiomic features. It was initiated in September 2016 and reached completion in March 2020. We have created two [jupyter notebooks](https://github.com/MEDomicsLab/MEDiml-pkg/tree/main/notebooks/ibsi) for each phase of the chapter and made them available for the users to run the IBSI tests for themselves. The tests can also be explored in interactive Colab notebooks that are directly accessible here:
       
-      - **Phase 1**: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MEDomicsLab/MEDiml/blob/main/notebooks/ibsi/ibsi1p1.ipynb)
-      - **Phase 2**: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MEDomicsLab/MEDiml/blob/main/notebooks/ibsi/ibsi1p2.ipynb)
+      - **Phase 1**: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MEDomicsLab/MEDiml-pkg/blob/main/notebooks/ibsi/ibsi1p1.ipynb)
+      - **Phase 2**: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MEDomicsLab/MEDiml-pkg/blob/main/notebooks/ibsi/ibsi1p2.ipynb)
 
   - ### IBSI Chapter 2
-      [The IBSI chapter 2](https://theibsi.github.io/ibsi2/) was launched in June 2020 and reached completion in February 2024. It is dedicated to the standardization of commonly used imaging filters in radiomic studies. We have created two [jupyter notebooks](https://github.com/MEDomicsLab/MEDiml/tree/main/notebooks/ibsi) for each phase of the chapter and made them available for the users to run the IBSI tests for themselves and validate image filtering and image biomarker calculations from filter response maps. The tests can also be explored in interactive Colab notebooks that are directly accessible here: 
+      [The IBSI chapter 2](https://theibsi.github.io/ibsi2/) was launched in June 2020 and reached completion in February 2024. It is dedicated to the standardization of commonly used imaging filters in radiomic studies. We have created two [jupyter notebooks](https://github.com/MEDomicsLab/MEDiml-pkg/tree/main/notebooks/ibsi) for each phase of the chapter and made them available for the users to run the IBSI tests for themselves and validate image filtering and image biomarker calculations from filter response maps. The tests can also be explored in interactive Colab notebooks that are directly accessible here: 
       
-      - **Phase 1**: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MEDomicsLab/MEDiml/blob/main/notebooks/ibsi/ibsi2p1.ipynb)
-      - **Phase 2**: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MEDomicsLab/MEDiml/blob/main/notebooks/ibsi/ibsi2p2.ipynb)
+      - **Phase 1**: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MEDomicsLab/MEDiml-pkg/blob/main/notebooks/ibsi/ibsi2p1.ipynb)
+      - **Phase 2**: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MEDomicsLab/MEDiml-pkg/blob/main/notebooks/ibsi/ibsi2p2.ipynb)
 
       Our team named *UdeS* (a.k.a. Université de Sherbrooke) has already submitted the benchmarked values to the [IBSI uploading website](https://ibsi.radiomics.hevs.ch/).
 
@@ -166,14 +168,38 @@ Make sure to run the notebooks with a Jupyter kernel that has `MEDiml` installed
 ! pip install MEDiml
 ```
 
-## 6. Acknowledgement
+## 6. Contributing and support
+Contributions are welcome! Please read the [contributing guidelines](CONTRIBUTING.md) and our [code of conduct](CODE_OF_CONDUCT.md).
+
+- **Report a bug or request a feature**: open an issue on the [issue tracker](https://github.com/MEDomicsLab/MEDiml-pkg/issues).
+- **Seek support**: check the [documentation](https://mediml.readthedocs.io/) and its [FAQs](https://mediml.readthedocs.io/en/latest/FAQs.html), then open an [issue](https://github.com/MEDomicsLab/MEDiml-pkg/issues) or contact the team at medomics.info@gmail.com.
+
+## 7. Citation
+If you use MEDiml in your research, please cite it using:
+
+```bibtex
+@misc{loutfi2026mediml,
+  title         = {Medical Image Analysis with Machine Learning ({MEDiml}): Strategies for Simpler Radiomics},
+  author        = {Ait Lhaj Loutfi, Mahdi and others},
+  year          = {2026},
+  eprint        = {2610.37715},
+  archiveprefix = {arXiv},
+  doi           = {10.48550/arXiv.2610.37715}
+}
+```
+
+The full reference manual of MEDiml is available on [arXiv](https://arxiv.org/abs/2610.29666).
+
+## 8. Acknowledgement
 MEDiml is an open-source package developed at the [MEDomicsLab](https://www.medomicslab.com/en/) laboratory with the collaboration of the international consortium [MEDomics](https://www.medomics.ai/). We welcome any contribution and feedback. Furthermore, we wish that this package could serve the growing radiomics research community by providing a flexible as well as [IBSI](https://theibsi.github.io/) standardized tool to reimplement existing methods and develop new ones.
 
-## 7. Authors
-* [MEDomicsLab](https://www.medomicslab.com/en/): Research laboratory at Université de Sherbrooke & McGill University.
+## 9. Authors
+
+MEDiml is developed by:
+* [MEDomicsLab](https://www.medomicslab.com/): Research laboratory at Université de Sherbrooke & McGill University.
 * [MEDomics](https://github.com/medomics/): MEDomics consortium.
 
-## 8. Statement
+## 10. Statement
 
 This package is part of https://github.com/medomics, a package providing research utility tools for developing precision medicine applications.
 
@@ -195,4 +221,4 @@ Here's what the license entails:
 9. The software author or license can not be held liable for any damages inflicted by the software.
 ```
 
-More information on about the [LICENSE can be found here](https://github.com/MEDomicsLab/MEDiml/blob/main/LICENSE.md)
+More information on about the [LICENSE can be found here](https://github.com/MEDomicsLab/MEDiml-pkg/blob/main/LICENSE.md)
