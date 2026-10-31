@@ -145,7 +145,8 @@ Automated CSV Generation
 
 The ``generate_roi_csv.py`` script is located in the ``scripts/`` directory. It requires:
 
-- A dataset organized according to the MEDiml conventions (``PatientID/ImagingScanName/files``)
+- A dataset organized according to the MEDiml conventions (``PatientID/Modality/ImagingScanName/{images,masks}/files`` for DICOM,
+  see :doc:`../input_data`)
 - DICOM RTstruct files (for DICOM data) or NIfTI mask files (for NIfTI data) containing ROI information
 - Python 3.6+ with dependencies: ``pydicom``, ``pandas``, ``tqdm``
 
@@ -200,7 +201,7 @@ This mode is useful when you want to automate CSV generation in your analysis pi
 
 **Command-line arguments:**
 
-- ``--dataset-path`` (required): Path to your dataset organized by PatientID/ImagingScanName
+- ``--dataset-path`` (required): Path to your dataset organized by PatientID/Modality/ImagingScanName (DICOM)
 - ``--output-dir`` (required): Directory where CSV files will be saved
 - ``--dicom-or-nifti`` (required): Specify ``dicom`` or ``nifti`` depending on your data format
 - ``--options`` (optional): Space-separated list of options to generate (A, B, C, D). If omitted, runs in interactive mode

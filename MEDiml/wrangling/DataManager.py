@@ -24,6 +24,7 @@ from tqdm import tqdm, trange
 from ..MEDscan import MEDscan
 from ..processing.PETSUVConverter import PETSUVConverter
 from ..processing.segmentation import get_roi_from_indexes
+from ..utils.dicom_dataset import get_dicom_scan_dir
 from ..utils.get_file_paths import get_file_paths
 from ..utils.get_patient_names import get_patient_names
 from ..utils.imref import imref3d
@@ -884,7 +885,8 @@ class DataManager(object):
     def __get_dicom_scan_dirs(self, path_search: Union[Path, str], wildcard: str) -> List[Path]:
         """Returns the folders of the DICOM scans (one folder per 3D volume) matching the wildcard.
 
-        The DICOM dataset must be organized as ``path_search/PatientID/ImagingScanName/*.dcm``.
+        The DICOM dataset must be organized as ``path_search/PatientID/Modality/ImagingScanName/{images,masks}/*.dcm``
+        (``path_search/PatientID/Modality/{images,masks}/*.dcm`` if the sequence is unknown).
 
         Args:
             path_search (Union[Path, str]): Path to the DICOM dataset.
@@ -897,20 +899,21 @@ class DataManager(object):
         dicom_files = get_file_paths(path_search, '*.dcm')
         if not dicom_files:
             raise ValueError(f"No DICOM file (.dcm) was found in: {path_search}")
-        # Each DICOM file is a single slice, so it must be located in a
-        # "PatientID/ImagingScanName" folder holding the whole 3D volume.
-        misplaced = [f for f in dicom_files if len(f.relative_to(path_search).parts) != 3]
+        # Each DICOM file is a single slice, so it must be located in a "PatientID/Modality/ImagingScanName"
+        # (or "PatientID/Modality") folder holding the whole 3D volume.
+        scan_dirs = {f: get_dicom_scan_dir(f) for f in dicom_files}
+        misplaced = [f for f, d in scan_dirs.items() if len(d.relative_to(path_search).parts) not in (2, 3)]
         if misplaced:
             raise ValueError(
                 f"The DICOM dataset in {path_search} is not organized by patients and imaging scans "
                 f"({len(misplaced)} DICOM file(s) misplaced, e.g. {misplaced[0]}). The expected structure is "
-                "'path_data/PatientID/ImagingScanName/*.dcm', where each patient and each imaging scan "
-                "(modality) is a sub-folder. Please organize your DICOM dataset using the script "
-                "'scripts/process_dataset.py' before running the radiomics pre-checks."
+                "'path_data/PatientID/Modality/ImagingScanName/{images,masks}/*.dcm', where each patient, "
+                "each imaging modality and each imaging scan (sequence) is a sub-folder. Please organize your "
+                "DICOM dataset using the script 'scripts/organize_dataset.py' before running the radiomics pre-checks."
             )
         # DICOM file names rarely carry useful info (e.g. modality), so the
         # wildcard is matched against the whole file path instead.
-        return sorted({f.parent for f in dicom_files if fnmatch.fnmatch(str(f), wildcard)})
+        return sorted({scan_dirs[f] for f in dicom_files if fnmatch.fnmatch(str(f), wildcard)})
 
     def __load_medscan_for_pre_radiomics_checks(
             self,

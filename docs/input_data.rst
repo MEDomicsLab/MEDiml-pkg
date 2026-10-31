@@ -59,52 +59,78 @@ the fields of all the DICOM files as long as the dataset is organized in the fol
 ::
 
     dataset_folder
-    ├── Patient ID 1      
-    │   ├── ImagingScanName 1
-    │   │   ├── DICOM files
-    │   │   └── ...
-    │   └── ImagingScanName 2
-    │       ├── DICOM files
+    ├── Patient ID 1
+    │   ├── Modality 1
+    │   │   ├── ImagingScanName 1
+    │   │   │   ├── images
+    │   │   │   │   └── DICOM files
+    │   │   │   └── masks
+    │   │   │       └── DICOM files
+    │   │   └── ImagingScanName 2
+    │   │       └── ...
+    │   └── Modality 2
     │       └── ...
-    ├── Patient ID 2      
-    │   ├── ImagingScanName 1
-    │   │   ├── DICOM files
-    │   │   └── ...
-    │   └── ImagingScanName 2
-    │       ├── DICOM files
-    │       └── ...
+    ├── Patient ID 2
+    │   └── ...
     └── ...
+
+Each patient folder contains one folder per imaging modality (``MRI``, ``CT``, ``PET`` or ``ADC``), which contains one folder
+per imaging scan (the MRI sequence, for example ``T1``). Each imaging scan folder separates its files in two sub-folders:
+
+- ``images``: The DICOM files of the imaging volume (one file per slice).
+- ``masks``: The DICOM files defining the regions of interest of the imaging volume (RTstruct or SEG files).
 
 For example:
 
 ::
 
     dataset_folder
-    ├── STS-McGill-001      
-    │   ├── T1
-    │   │   ├── *.dcm
-    │   │   └── ...
+    ├── STS-McGill-001
+    │   ├── MRI
+    │   │   ├── T1
+    │   │   │   ├── images
+    │   │   │   │   └── *.dcm
+    │   │   │   └── masks
+    │   │   │       └── *.dcm
+    │   │   └── T2FS
+    │   │       ├── images
+    │   │       │   └── *.dcm
+    │   │       └── masks
+    │   │           └── *.dcm
     │   └── PET
-    │       ├── *.dcm
-    │       └── ...
-    ├── STS-McGill-002      
-    │   ├── T2FS
-    │   │   ├── *.dcm
-    │   │   └── ...
+    │       ├── images
+    │       │   └── *.dcm
+    │       └── masks
+    │           └── *.dcm
+    ├── STS-McGill-002
     │   └── CT
-    │       ├── *.dcm
-    │       └── ...
+    │       ├── images
+    │       │   └── *.dcm
+    │       └── masks
+    │           └── *.dcm
     └── ...
+
+Some levels of this structure can be omitted:
+
+- **Unknown sequence**: if the sequence of an imaging scan is unknown (no ``SeriesDescription``), the modality folder is enough and
+  holds the files of the scan directly, like the ``PET`` folder of ``STS-McGill-001`` above. The imaging scan is then named after its
+  modality (``ImagingScanName`` is ``PET`` in the :doc:`../csv_file`). This only applies if the patient has a single scan of this
+  modality, otherwise each scan gets its own folder (named after the modality, ``PET-2``, etc. if needed).
+- **Images and masks not separated**: if the masks cannot be told apart from the images, all the DICOM files can be put directly in
+  the imaging scan folder (or the modality folder if the sequence is unknown). The other DICOM files that are neither images nor masks
+  (for example RTdose files) are also put there.
 
 Just run the following command: ::
 
-  python scripts/process_dataset.py --path-dataset path/to/your/dataset/folder
+  python scripts/organize_dataset.py --path-dataset path/to/your/dataset/folder
 
 If your dataset is not organized this way yet, the script will organize it for you: all the DICOM files found in the dataset folder
-(and its sub-folders) are grouped by ``PatientID`` and imaging scan (``SeriesInstanceUID``), and copied to a new folder following
-the structure above (``path/to/your/dataset/folder_organized`` by default, use ``--path-save`` to change it). The original dataset is
-not modified. Each imaging scan folder is named after the scan's ``SeriesDescription`` (or its modality if missing), and the RTstruct
-files are copied in the folder of the imaging scan they reference. In both cases, the ``PatientID`` and ``SeriesDescription`` fields
-of the DICOM headers are then updated using the names of the patient and imaging scan folders. ::
+(and its sub-folders) are grouped by ``PatientID``, modality and imaging scan (``SeriesInstanceUID``), and copied to a new folder
+following the structure above (``path/to/your/dataset/folder_organized`` by default, use ``--path-save`` to change it). The original
+dataset is not modified. The modality folders are named after the DICOM ``Modality`` field (``MR`` becomes ``MRI`` and ``PT`` becomes
+``PET``) and each imaging scan folder is named after the scan's ``SeriesDescription``. The imaging files are copied in the ``images``
+sub-folder, and the RTstruct and SEG files are copied in the ``masks`` sub-folder of the imaging scan they reference. In both cases,
+the ``PatientID`` and ``SeriesDescription`` fields of the DICOM headers are then updated using the names of the patient and imaging scan
+folders (or the modality folder if the sequence is unknown). ::
 
-  python scripts/process_dataset.py --path-dataset path/to/your/dataset/folder --path-save path/to/the/organized/dataset
+  python scripts/organize_dataset.py --path-dataset path/to/your/dataset/folder --path-save path/to/the/organized/dataset

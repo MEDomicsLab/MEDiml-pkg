@@ -2,8 +2,8 @@
 ROI CSV Generator for MEDiml Feature Extraction
 
 This script automates the creation of ROI (Region of Interest) CSV files for MEDiml's
-feature extraction pipeline. It reads DICOM files from a dataset organized by PatientID
-and ImagingScanName, extracts available ROI names, and generates multiple CSV options
+feature extraction pipeline. It reads DICOM files from a dataset organized by PatientID,
+Modality and ImagingScanName, extracts available ROI names, and generates multiple CSV options
 with different ROI combinations.
 
 Author: MEDiml
@@ -38,7 +38,8 @@ class ROICSVGenerator:
         Initialize the ROI CSV Generator.
 
         Args:
-            dataset_path: Path to the dataset organized by PatientID/ImagingScanName
+            dataset_path: Path to the dataset organized by PatientID/Modality/ImagingScanName (DICOM)
+                or PatientID/ImagingScanName (NIfTI)
             output_dir: Directory to save output CSV files (default: dataset_path/roi_csv)
             dicom: Whether to scan for DICOM files (True) or NIfTI files (False)
         """
@@ -88,6 +89,22 @@ class ROICSVGenerator:
             logger.warning(f"Error reading DICOM file {dicom_path}: {e}")
             return []
     
+    def _extract_modality_from_dicom(self, scan_folder: Path) -> str:
+        """
+        Extract the modality of an imaging scan from the header of its first imaging DICOM file.
+
+        Args:
+            scan_folder: Path to the imaging scan folder
+        Returns:
+            str: Modality of the imaging scan (e.g., 'CTscan', 'MRscan'), 'Unknown' if not found
+        """
+        for file in sorted(scan_folder.rglob('*')):
+            if file.is_file() and self._is_dicom_file(file):
+                modality = str(getattr(pydicom.dcmread(str(file), stop_before_pixels=True, force=True), 'Modality', ''))
+                if modality in ('MR', 'PT', 'CT', 'ADC'):
+                    return modality + 'scan'
+        return 'Unknown'
+
     def _extract_rois_from_nifti(self, nifti_path: Path) -> List[str]:
         """
         Extract ROI names from a NIfTI file.
@@ -128,13 +145,17 @@ class ROICSVGenerator:
         """
         Scan dataset folder structure and extract ROI information.
 
-        Expected structure:
+        Expected structure (DICOM, see scripts/organize_dataset.py):
         dataset_path/
             PatientID1/
-                ImagingScanName1/
-                    DICOM files (RT Structure Set)
-                ImagingScanName2/
-                    DICOM files
+                Modality1/
+                    ImagingScanName1/
+                        images/
+                            DICOM files
+                        masks/
+                            DICOM files (RT Structure Set)
+                    ImagingScanName2/
+                        ...
             PatientID2/
                 ...
         """
@@ -156,7 +177,12 @@ class ROICSVGenerator:
                             roi_names = self._extract_rois_from_dicom(dicom_file)
 
                             if roi_names:
-                                self.roi_data[patient_id][scan_name].extend(roi_names)
+                                # The masks are in the "masks" sub-folder of their imaging scan folder
+                                scan_folder = dicom_file.parent
+                                if scan_folder.name in ('images', 'masks'):
+                                    scan_folder = scan_folder.parent
+                                modality = self._extract_modality_from_dicom(scan_folder)
+                                self.roi_data[patient_id][scan_folder.name][modality].extend(roi_names)
                                 self.all_unique_rois.update(roi_names)
 
                 else:
@@ -384,7 +410,7 @@ class ROICSVGenerator:
         print("ROI CSV GENERATION OPTIONS")
         print("="*80)
 
-        print("\n📋 OPTION A: Single ROI per Patient")
+        print("\nOPTION A: Single ROI per Patient")
         print("-" * 80)
         print("Each patient/scan gets a single ROI (the first alphabetically).")
         print(f"Number of rows: {len(option_a)}")
@@ -394,7 +420,7 @@ class ROICSVGenerator:
         has_multiple_rois = self._check_multiple_rois()
 
         if has_multiple_rois:
-            print("\n📋 OPTION B: All Possible ROI Combinations")
+            print("\nOPTION B: All Possible ROI Combinations")
             print("-" * 80)
             print(f"Number of combination variants: {len(option_b)}")
             if len(self.all_unique_rois) <= 10:
@@ -407,7 +433,7 @@ class ROICSVGenerator:
                 print(f"\nPreview (combination_1, {len(combo_sample)} rows):")
                 print(combo_sample.head(3).to_string(index=False))
 
-            print("\n📋 OPTION C: All ROIs Combined")
+            print("\nOPTION C: All ROIs Combined")
             print("-" * 80)
             print("For patients with multiple ROIs, all ROIs are combined using (+) operator.")
             print("Example: {GTV_Edema}+{GTV_Mass}")
@@ -415,7 +441,7 @@ class ROICSVGenerator:
             print("\nPreview:")
             print(option_c.head(3).to_string(index=False))
 
-            print("\n📋 OPTION D: All Possible Subtractions")
+            print("\nOPTION D: All Possible Subtractions")
             print("-" * 80)
             print("For patients with multiple ROIs, all pairwise subtractions are generated.")
             print("Example: {GTV_Edema}-{GTV_Mass} and {GTV_Mass}-{GTV_Edema}")
@@ -427,7 +453,7 @@ class ROICSVGenerator:
                 print(f"\nPreview ({subtraction_name}, {len(sub_sample)} rows):")
                 print(sub_sample.head(3).to_string(index=False))
         else:
-            print("\n⚠️  OPTION B, C, D: Not Available")
+            print("\nWARNING: OPTION B, C, D: Not Available")
             print("-" * 80)
             print("These options require patients with multiple ROIs.")
             print("All patients in this dataset have single ROIs.")
@@ -443,7 +469,7 @@ class ROICSVGenerator:
         """
         selected = []
 
-        print("\n🔧 SELECT OPTIONS TO SAVE")
+        print("\nSELECT OPTIONS TO SAVE")
         print("-" * 80)
 
         # Always available
@@ -537,7 +563,7 @@ class ROICSVGenerator:
             json.dump(summary, f, indent=2)
         logger.info(f"Saved summary: {summary_file}")
 
-        print(f"\n✅ Successfully saved {len(saved_files)} CSV files to {self.output_dir}")
+        print(f"\nSuccessfully saved {len(saved_files)} CSV files to {self.output_dir}")
 
     def run_interactive(self) -> None:
         """Run the complete interactive ROI CSV generation process."""
@@ -594,7 +620,7 @@ Examples:
         '--dataset-path',
         required=True,
         type=str,
-        help='Path to dataset organized by PatientID/ImagingScanName'
+        help='Path to dataset organized by PatientID/Modality/ImagingScanName (DICOM) or PatientID/ImagingScanName (NIfTI)'
     )
     parser.add_argument(
         '--output-dir',

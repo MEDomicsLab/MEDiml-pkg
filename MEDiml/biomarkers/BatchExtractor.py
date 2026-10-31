@@ -16,6 +16,7 @@ import ray
 from tqdm import trange
 
 import MEDiml
+from MEDiml.utils.dicom_dataset import find_dicom_scan_dir, get_dicom_scan_dir
 from MEDiml.utils.parse_nifti_name import is_nifti_file, is_roi_file, parse_nifti_name
 from MEDiml.wrangling.DataManager import DataManager
 
@@ -185,17 +186,20 @@ class BatchExtractor(object):
 
         elif self.use_dicoms:
             path_read = self._path_dicoms
-            # The DICOM datasets are organized as "path_read/PatientID/ImagingScanName".
-            for patient_dir in sorted(p for p in path_read.iterdir() if p.is_dir()):
-                for scan_dir in sorted(s for s in patient_dir.iterdir() if s.is_dir()):
-                    modality = self.__peek_dicom_modality(scan_dir)
-                    if modality is None:
-                        logging.warning(f"Could not determine the modality of {scan_dir}, skipping it.")
-                        continue
-                    scan = (patient_dir.name, scan_dir.name, modality)
-                    if scan not in scans_found:
-                        scans_found.add(scan)
-                        scans += [scan]
+            # The DICOM datasets are organized as "path_read/PatientID/Modality/ImagingScanName"
+            # (or "path_read/PatientID/Modality" if the sequence is unknown).
+            for scan_dir in sorted({get_dicom_scan_dir(f) for f in path_read.rglob('*.dcm')}):
+                relative_parts = scan_dir.relative_to(path_read).parts
+                if len(relative_parts) < 2:
+                    continue
+                modality = self.__peek_dicom_modality(scan_dir)
+                if modality is None:
+                    logging.warning(f"Could not determine the modality of {scan_dir}, skipping it.")
+                    continue
+                scan = (relative_parts[0], scan_dir.name, modality)
+                if scan not in scans_found:
+                    scans_found.add(scan)
+                    scans += [scan]
 
         else:
             path_read = self._path_npy
@@ -312,12 +316,13 @@ class BatchExtractor(object):
                 return log_file
         elif self.use_dicoms:
             try:
-                dicom_scan_path = self._path_dicoms / patient_id / sequence
-                if dicom_scan_path.exists():
+                dicom_scan_path = find_dicom_scan_dir(self._path_dicoms, patient_id, sequence)
+                if dicom_scan_path is not None:
                     dm = DataManager(path_to_dicoms=dicom_scan_path)
                     medscan = dm.process_one_dicom()
                 else:
-                    logging.error(f"DICOM directory not found for {name_patient} in {self._path_dicoms}. Expected path: {dicom_scan_path}")
+                    logging.error(f"DICOM directory not found for {name_patient} in {self._path_dicoms}. "
+                                  f"Expected path: {self._path_dicoms / patient_id}/<Modality>/{sequence}")
                     return log_file
             except Exception as e:
                 logging.error(f"Error loading DICOM files for {patient_id}: {e}")
@@ -928,7 +933,8 @@ class BatchExtractor(object):
                     all_files = list(self._path_niftis.rglob('*.nii*'))
                     condition = lambda x: any(f"{x['PatientID']}__{x['ImagingScanName']}" in file.name for file in all_files)
                 elif self.use_dicoms:
-                    condition = lambda x: (self._path_dicoms / f"{x['PatientID']}/{x['ImagingScanName']}").exists()
+                    condition = lambda x: find_dicom_scan_dir(
+                        self._path_dicoms, str(x['PatientID']), str(x['ImagingScanName'])) is not None
                 else:
                     all_files = list(self._path_npy.rglob('*.npy'))
                     condition = lambda x: any(f"{x['PatientID']}__{x['ImagingScanName']}" in file.name for file in all_files)

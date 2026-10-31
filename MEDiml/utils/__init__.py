@@ -2,6 +2,7 @@ from . import *
 from .batch_patients import *
 from .create_radiomics_table import *
 from .data_frame_export import *
+from .dicom_dataset import *
 from .find_process_names import *
 from .get_file_paths import *
 from .get_full_rad_names import *

@@ -10,9 +10,17 @@ import pydicom
 import pydicom.misc
 from tqdm import tqdm
 
-# Imaging modalities handled by MEDiml, all the other DICOM files (RTSTRUCT, RTDOSE...)
-# are associated to the imaging scan they reference.
-IMAGING_MODALITIES = ['MR', 'PT', 'CT', 'ADC']
+# Imaging modalities handled by MEDiml and the name of their folder in the organized dataset.
+# All the other DICOM files (RTSTRUCT, RTDOSE...) are associated to the imaging scan they reference.
+MODALITY_FOLDERS = {'MR': 'MRI', 'CT': 'CT', 'PT': 'PET', 'ADC': 'ADC'}
+IMAGING_MODALITIES = list(MODALITY_FOLDERS)
+# Segmentation modalities, copied in the masks sub-folder of the imaging scan they reference.
+# The other non-imaging files (RTDOSE, RTPLAN...) are copied in the imaging scan folder itself.
+MASK_MODALITIES = ['RTSTRUCT', 'SEG']
+# Sub-folders separating the imaging volumes from the masks in each imaging scan folder
+# (must match the names used in MEDiml/utils/dicom_dataset.py).
+IMAGES_FOLDER = 'images'
+MASKS_FOLDER = 'masks'
 
 
 def sanitize_name(name: str) -> str:
@@ -28,9 +36,40 @@ def sanitize_name(name: str) -> str:
     return name.strip('-.') or 'Unknown'
 
 
+def get_sequence_name(header: pydicom.Dataset) -> Union[str, None]:
+    """Returns the sequence name of an imaging scan, read from its SeriesDescription.
+
+    Args:
+        header(pydicom.Dataset): Header of a DICOM file of the imaging scan.
+
+    Returns:
+        Union[str, None]: The sanitized sequence name, None if the sequence is unknown.
+    """
+    sequence = sanitize_name(getattr(header, 'SeriesDescription', '') or '')
+    if sequence in ('Unknown', MODALITY_FOLDERS[str(header.Modality)]):
+        return None
+    if sequence.lower() in (IMAGES_FOLDER, MASKS_FOLDER):
+        # Avoids confusing the sequence folder with the images and masks sub-folders
+        sequence += '-scan'
+    return sequence
+
+
+def get_scan_dir(file: Path) -> Path:
+    """Returns the folder of the imaging scan a DICOM file belongs to.
+
+    Args:
+        file(Path): Path to the DICOM file.
+
+    Returns:
+        Path: The folder of the file, or its parent if the file is in the images or masks sub-folder.
+    """
+    return file.parent.parent if file.parent.name in (IMAGES_FOLDER, MASKS_FOLDER) else file.parent
+
+
 def is_organized(path_dataset: Path, dicom_files: List[Path]) -> bool:
-    """Checks if the dataset is already organized as "path_dataset/PatientID/ImagingScanName/DICOM files"
-    with a single imaging series per scan folder.
+    """Checks if the dataset is already organized as "path_dataset/PatientID/Modality/Sequence/{images,masks}/*.dcm"
+    (or "path_dataset/PatientID/Modality/{images,masks}/*.dcm" if the sequence is unknown), with a single imaging
+    series per scan folder.
 
     Args:
         path_dataset(Path): Path to the dataset.
@@ -39,15 +78,27 @@ def is_organized(path_dataset: Path, dicom_files: List[Path]) -> bool:
     Returns:
         bool: True if the dataset is already organized.
     """
-    series_per_folder = defaultdict(set)
+    series_per_scan = defaultdict(set)
     for file in dicom_files:
         # MEDiml only reads the DICOM files with a ".dcm" extension
-        if len(file.relative_to(path_dataset).parts) != 3 or file.suffix != '.dcm':
+        parts = file.relative_to(path_dataset).parts
+        if file.suffix != '.dcm' or len(parts) < 3 or parts[1] not in MODALITY_FOLDERS.values():
+            return False
+        scan_dir = get_scan_dir(file)
+        if len(scan_dir.relative_to(path_dataset).parts) not in (2, 3):
             return False
         header = pydicom.dcmread(str(file), stop_before_pixels=True, force=True)
-        if str(getattr(header, 'Modality', '')) in IMAGING_MODALITIES:
-            series_per_folder[file.parent].add(header.SeriesInstanceUID)
-    return all(len(series) == 1 for series in series_per_folder.values())
+        modality = str(getattr(header, 'Modality', ''))
+        if modality in IMAGING_MODALITIES:
+            if file.parent.name == MASKS_FOLDER:
+                return False
+            series_per_scan[scan_dir].add(header.SeriesInstanceUID)
+        elif modality in MASK_MODALITIES and file.parent.name == IMAGES_FOLDER:
+            return False
+    # A modality folder cannot hold the files of an imaging scan and other imaging scan folders
+    if any(scan_dir.parent in series_per_scan for scan_dir in series_per_scan):
+        return False
+    return all(len(series) == 1 for series in series_per_scan.values())
 
 
 def get_referenced_series_uid(header: pydicom.Dataset) -> Union[str, None]:
@@ -86,9 +137,13 @@ def get_frame_of_reference_uid(header: pydicom.Dataset) -> Union[str, None]:
 
 
 def organize(path_save: Path, dicom_files: List[Path]) -> None:
-    """Copies all the DICOM files of the dataset in "path_save/PatientID/ImagingScanName/",
-    one folder per imaging scan (Series Instance UID). The non-imaging files (RTSTRUCT...)
-    are copied in the folder of the imaging scan they reference.
+    """Copies all the DICOM files of the dataset in "path_save/PatientID/Modality/Sequence/",
+    one folder per imaging scan (Series Instance UID). The imaging files are copied in the "images"
+    sub-folder and the masks (RTSTRUCT, SEG) in the "masks" sub-folder of the imaging scan they reference.
+    The other non-imaging files (RTDOSE...) are copied in the imaging scan folder itself.
+
+    If the sequence of a scan is unknown (no SeriesDescription), the scan is named after its modality and
+    its files are put directly in the modality folder, unless the patient has other scans of this modality.
 
     Args:
         path_save(Path): Path where to save the organized dataset.
@@ -98,7 +153,7 @@ def organize(path_save: Path, dicom_files: List[Path]) -> None:
         None.
     """
     images = defaultdict(list)  # Series Instance UID -> DICOM files
-    series_info = {}            # Series Instance UID -> (PatientID, scan name, Frame of Reference UID)
+    series_info = {}            # Series Instance UID -> (PatientID, modality folder, sequence, Frame of Reference UID)
     others = []                 # (DICOM file, header) of the non-imaging files
     print('--> Reading all the DICOM headers')
     for file in tqdm(dicom_files):
@@ -112,51 +167,63 @@ def organize(path_save: Path, dicom_files: List[Path]) -> None:
             series_uid = header.SeriesInstanceUID
             images[series_uid].append(file)
             if series_uid not in series_info:
-                scan_name = getattr(header, 'SeriesDescription', '') or modality
                 series_info[series_uid] = (
                     sanitize_name(getattr(header, 'PatientID', '') or 'Unknown'),
-                    sanitize_name(scan_name),
+                    MODALITY_FOLDERS[modality],
+                    get_sequence_name(header),
                     get_frame_of_reference_uid(header)
                 )
         else:
             others.append((file, header))
 
     # Name the scan folders, a number is added if a patient has many scans with the same name
+    scans_per_modality = defaultdict(list)
+    for series_uid, (patient_id, modality_folder, sequence, _) in series_info.items():
+        scans_per_modality[(patient_id, modality_folder)].append((sequence or modality_folder, series_uid))
     scan_dirs = {}
-    names_used = defaultdict(int)
-    for series_uid, (patient_id, scan_name, _) in sorted(series_info.items(), key=lambda x: x[1][:2]):
-        names_used[(patient_id, scan_name)] += 1
-        count = names_used[(patient_id, scan_name)]
-        folder_name = scan_name if count == 1 else f'{scan_name}-{count}'
-        scan_dirs[series_uid] = path_save / patient_id / folder_name
+    for (patient_id, modality_folder), scans in scans_per_modality.items():
+        path_modality = path_save / patient_id / modality_folder
+        if len(scans) == 1 and series_info[scans[0][1]][2] is None:
+            # Single scan of unknown sequence, the modality folder is enough
+            scan_dirs[scans[0][1]] = path_modality
+            continue
+        names_used = defaultdict(int)
+        for scan_name, series_uid in sorted(scans):
+            names_used[scan_name] += 1
+            count = names_used[scan_name]
+            scan_dirs[series_uid] = path_modality / (scan_name if count == 1 else f'{scan_name}-{count}')
 
     # Associate the non-imaging files to their imaging scan
-    files_to_copy = [(file, scan_dirs[uid]) for uid, files in images.items() for file in files]
+    files_to_copy = [(file, scan_dirs[uid] / IMAGES_FOLDER) for uid, files in images.items() for file in files]
     for file, header in others:
         series_uid = get_referenced_series_uid(header)
         if series_uid not in scan_dirs:
             # Fall back on the Frame of Reference UID, only if it identifies a single scan
             frame_uid = get_frame_of_reference_uid(header)
-            matches = [uid for uid, info in series_info.items() if frame_uid and info[2] == frame_uid]
+            matches = [uid for uid, info in series_info.items() if frame_uid and info[3] == frame_uid]
             series_uid = matches[0] if len(matches) == 1 else None
         if series_uid is None:
             print(f'Could not associate {file} ({getattr(header, "Modality", "Unknown modality")}) '
                   'to a single imaging scan, it will be ignored.')
             continue
-        files_to_copy.append((file, scan_dirs[series_uid]))
+        if str(getattr(header, 'Modality', '')) in MASK_MODALITIES:
+            files_to_copy.append((file, scan_dirs[series_uid] / MASKS_FOLDER))
+        else:
+            # Neither an image nor a mask, kept in the imaging scan folder
+            files_to_copy.append((file, scan_dirs[series_uid]))
 
     # Copy the files, named after their SOP Instance UID with a ".dcm" extension (required by MEDiml)
     print(f'--> Copying the DICOM files of {len(scan_dirs)} imaging scan(s) to {path_save}')
-    for file, scan_dir in tqdm(files_to_copy):
-        scan_dir.mkdir(parents=True, exist_ok=True)
+    for file, folder in tqdm(files_to_copy):
+        folder.mkdir(parents=True, exist_ok=True)
         header = pydicom.dcmread(str(file), stop_before_pixels=True, force=True)
         name = getattr(header, 'SOPInstanceUID', '') or file.stem
-        shutil.copy2(file, scan_dir / f'{name}.dcm')
+        shutil.copy2(file, folder / f'{name}.dcm')
 
 
 def update_headers(path_dataset: Path) -> None:
     """Updates the PatientID and the SeriesDescription of all the DICOM files of an organized dataset
-    using the names of the patient and imaging scan folders.
+    using the names of the patient and imaging scan folders (the modality folder if the sequence is unknown).
 
     Args:
         path_dataset(Path): Path to the organized dataset.
@@ -165,19 +232,17 @@ def update_headers(path_dataset: Path) -> None:
         None.
     """
     print('--> Updating the DICOM headers')
-    for folder_patient_id in sorted(f for f in path_dataset.iterdir() if f.is_dir()):
-        for folder_imaging_scan in sorted(f for f in folder_patient_id.iterdir() if f.is_dir()):
-            for file in folder_imaging_scan.glob('*.dcm'):
-                dicom_header = pydicom.dcmread(str(file))
-                dicom_header.PatientID = os.path.basename(folder_patient_id)
-                if 'SeriesDescription' in dicom_header:
-                    dicom_header.SeriesDescription = os.path.basename(folder_imaging_scan)
-                dicom_header.save_as(str(file))
+    for file in tqdm(sorted(path_dataset.rglob('*.dcm'))):
+        dicom_header = pydicom.dcmread(str(file))
+        dicom_header.PatientID = file.relative_to(path_dataset).parts[0]
+        if 'SeriesDescription' in dicom_header:
+            dicom_header.SeriesDescription = os.path.basename(get_scan_dir(file))
+        dicom_header.save_as(str(file))
 
 
 def main(path_dataset: Union[str, Path], path_save: Union[str, Path] = None) -> None:
     """Process the dataset to follow the MEDiml conventions:
-    "dataset_folder/PatientID/ImagingScanName/*.dcm".
+    "dataset_folder/PatientID/Modality/Sequence/{images,masks}/*.dcm".
 
     If the dataset is not organized yet, the files are copied (the original dataset is not modified)
     in ``path_save`` following this structure. The PatientID and SeriesDescription fields of the
