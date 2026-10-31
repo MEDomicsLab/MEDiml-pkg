@@ -5,7 +5,7 @@ In ``MEDiml``, all the subpackages and modules need a specific configuration to 
 rely on one single JSON configuration file. This file contains parameters for each step of the workflow (processing, extraction...).
 For example, `IBSI <https://arxiv.org/abs/1612.07003>`__ tests require specific parameters for radiomics extraction for each test.
 You can check a full example of the file here: 
-`notebooks/ibsi/settings/ <https://github.com/MEDomicsLab/MEDiml/tree/main/notebooks/ibsi/settings>`__.
+`notebooks/ibsi/settings/ <https://github.com/MEDomicsLab/MEDiml-pkg/tree/main/notebooks/ibsi/settings>`__.
 This section will walk you through the details on how to set up and use the configuration file. It will be separated to four subdivision:
 
 - :ref:`Pre-checks<Pre-checks Parameters>`
