@@ -54,9 +54,9 @@ and optimality analysis, streamlining radiomics approaches. It complies with `in
    :maxdepth: 1
    :caption: Developer section
 
+   future_work
    License
    FAQs
-   future_work
 
 Indices and tables
 ==================
