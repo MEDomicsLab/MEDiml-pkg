@@ -56,6 +56,7 @@ and optimality analysis, streamlining radiomics approaches. It complies with `in
 
    License
    FAQs
+   future_work
 
 Indices and tables
 ==================
