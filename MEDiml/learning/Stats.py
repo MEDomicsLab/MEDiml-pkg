@@ -10,6 +10,7 @@ import pandas as pd
 import scipy
 from sklearn import metrics
 
+from MEDiml.learning.ml_utils import get_binary_outcome_table
 from MEDiml.utils.json_utils import load_json
 
 
@@ -39,8 +40,31 @@ class Stats:
         self.levels = levels
         self.modalities = modalities
 
-        # Safety assertion
-        self.__safety_assertion()
+    @staticmethod
+    def _load_outcomes(path_learn: Path) -> pd.DataFrame:
+        """
+        Loads the binary outcome used by a learning experiment. The path to the outcomes table and
+        the name of the binary outcome column are read from the "paths_ml.json" file saved in the
+        experiment's test folders.
+
+        Args:
+            path_learn (Path): Path to the learning folder of the experiment (learn__$experiment_label$).
+
+        Returns:
+            pd.DataFrame: Single-column binary outcome table, indexed by patient IDs.
+        """
+        path_learn = Path(path_learn)
+        path_paths_ml = path_learn / 'test__001' / 'paths_ml.json'
+        if not path_paths_ml.exists():
+            candidates = sorted(path_learn.glob('test__*/paths_ml.json'))
+            if not candidates:
+                raise FileNotFoundError(f"No paths_ml.json found in the test folders of {path_learn}")
+            path_paths_ml = candidates[0]
+
+        paths_ml = load_json(path_paths_ml)
+        outcome_table = pd.read_csv(paths_ml['outcomes'], index_col=0)
+
+        return get_binary_outcome_table(outcome_table, paths_ml.get('outcome_column'))
     
     def __get_models_dicts(self, split_idx: int) -> Path:
         """
@@ -210,7 +234,7 @@ class Stats:
         J = np.argsort(x)
         Z = x[J]
         N = len(x)
-        T = np.zeros(N, dtype=np.float)
+        T = np.zeros(N, dtype=float)
         i = 0
         while i < N:
             j = i
@@ -218,7 +242,7 @@ class Stats:
                 j += 1
             T[i:j] = 0.5*(i + j - 1)
             i = j
-        T2 = np.empty(N, dtype=np.float)
+        T2 = np.empty(N, dtype=float)
         # Note(kazeevn) +1 is due to Python using 0-based indexing
         # instead of 1-based in the AUC formula in the paper
         T2[J] = T + 1
@@ -257,9 +281,9 @@ class Stats:
         negative_examples = predictions_sorted_transposed[:, m:]
         k = predictions_sorted_transposed.shape[0]
 
-        tx = np.empty([k, m], dtype=np.float)
-        ty = np.empty([k, n], dtype=np.float)
-        tz = np.empty([k, m + n], dtype=np.float)
+        tx = np.empty([k, m], dtype=float)
+        ty = np.empty([k, n], dtype=float)
+        tz = np.empty([k, m + n], dtype=float)
         for r in range(k):
             tx[r, :] = self.__compute_midrank(positive_examples[r, :])
             ty[r, :] = self.__compute_midrank(negative_examples[r, :])
@@ -356,10 +380,7 @@ class Stats:
         """
         
         # Load outcomes dataframe
-        try:
-            outcomes = pd.read_csv(path_experiment / "outcomes.csv", sep=',')
-        except:
-            outcomes = pd.read_csv(path_experiment.parent / "outcomes.csv", sep=',')
+        outcomes = Stats._load_outcomes(Path(path_experiment) / f'learn__{experiment}_{level}_{modality}')
 
         # Initialization
         predictions_all = list()
@@ -397,7 +418,7 @@ class Stats:
         # Get ground truth for selected patients
         ground_truth = []
         for patient in patients_ids_all:
-            ground_truth.append(outcomes[outcomes['PatientID'] == patient][outcomes.columns[-1]].values[0])
+            ground_truth.append(outcomes.loc[patient].iloc[0])
         
         # to numpy array
         ground_truth = np.array(ground_truth)
@@ -446,10 +467,8 @@ class Stats:
         """
         
         # Load outcomes dataframe
-        try:
-            outcomes = pd.read_csv(self.path_experiment / "outcomes.csv", sep=',')
-        except:
-            outcomes = pd.read_csv(self.path_experiment.parent / "outcomes.csv", sep=',')
+        outcomes = self._load_outcomes(
+            Path(self.path_experiment) / f'learn__{self.experiment}_{self.levels[0]}_{self.modalities[0]}')
 
         # Initialization
         predictions_one_all = list()
@@ -470,7 +489,7 @@ class Stats:
         # Get ground truth for selected patients
         ground_truth = []
         for patient in patients_ids_all:
-            ground_truth.append(outcomes[outcomes['PatientID'] == patient][outcomes.columns[-1]].values[0])
+            ground_truth.append(outcomes.loc[patient].iloc[0])
 
         # to numpy array
         ground_truth = np.array(ground_truth)
@@ -558,10 +577,8 @@ class Stats:
             return self.get_aggregated_delong_p_value()
         
         # Load outcomes dataframe
-        try:
-            outcomes = pd.read_csv(self.path_experiment / "outcomes.csv", sep=',')
-        except:
-            outcomes = pd.read_csv(self.path_experiment.parent / "outcomes.csv", sep=',')
+        outcomes = self._load_outcomes(
+            Path(self.path_experiment) / f'learn__{self.experiment}_{self.levels[0]}_{self.modalities[0]}')
 
         # Initialization
         nb_split = len([x[0] for x in os.walk(self.path_experiment / f'learn__{self.experiment}_{self.levels[0]}_{self.modalities[0]}')]) - 1
@@ -575,7 +592,7 @@ class Stats:
             # Get ground truth for selected patients
             ground_truth = []
             for patient in patients_ids:
-                ground_truth.append(outcomes[outcomes['PatientID'] == patient][outcomes.columns[-1]].values[0])
+                ground_truth.append(outcomes.loc[patient].iloc[0])
             
             # to numpy array
             ground_truth = np.array(ground_truth)

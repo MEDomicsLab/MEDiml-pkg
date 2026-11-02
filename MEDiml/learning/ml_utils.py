@@ -1,7 +1,5 @@
 import csv
-import json
 import os
-import pickle
 import re
 import string
 from copy import deepcopy
@@ -26,6 +24,8 @@ METRICS_LIST = [
     'Precision', 'NPV', 'F1_score', 'Accuracy', 'MCC',
     'TN', 'FP', 'FN', 'TP'
 ]
+# Default name of the outcomes table (used when no explicit path is given)
+DEFAULT_OUTCOMES_FILENAME = 'outcomes.csv'
 
 def average_results(path_results: Path, save: bool = False) -> dict:
     """
@@ -256,22 +256,55 @@ def convert_comibnations_to_list(combinations_string: str) -> Tuple[List, List]:
     
     return combinations, model_ids
 
-def count_class_imbalance(path_csv_outcomes: Path) -> Dict:
+def get_binary_outcome_table(outcome_table: pd.DataFrame, outcome_column: str = None) -> pd.DataFrame:
+    """
+    Selects and validates the binary outcome column of an outcome table. The table must be
+    indexed by the patient IDs (i.e. loaded with ``index_col=0``).
+
+    Args:
+        outcome_table (pd.DataFrame): Outcome table indexed by patient IDs.
+        outcome_column (str, optional): Name of the binary outcome column. If None, the first
+            column after the patient IDs is used.
+
+    Returns:
+        pd.DataFrame: Single-column table with the binary outcome, indexed by patient IDs.
+    """
+    if outcome_column is None:
+        if outcome_table.shape[1] == 0:
+            raise ValueError("The outcome table has no outcome column besides the patient IDs.")
+        outcome_column = outcome_table.columns[0]
+    elif outcome_column not in outcome_table.columns:
+        raise ValueError(
+            f"Outcome column '{outcome_column}' not found in the outcome table. "
+            f"Available columns: {list(outcome_table.columns)}"
+        )
+
+    outcome_table_binary = outcome_table[[outcome_column]]
+    values = set(outcome_table_binary[outcome_column].dropna().unique())
+    if not values <= {0, 1}:
+        raise ValueError(
+            f"Outcome column '{outcome_column}' must be binary (0/1). Found values: {sorted(values, key=str)}"
+        )
+
+    return outcome_table_binary
+
+def count_class_imbalance(path_csv_outcomes: Path, outcome_column: str = None) -> Dict:
     """
     Counts the class imbalance in a given outcome table.
-    
+
     Args:
         path_csv_outcomes (Path): Path to the outcome table.
+        outcome_column (str, optional): Name of the binary outcome column. If None, the first
+            column after the patient IDs is used.
 
     Returns:
         Dict: Dictionary containing the count of each class.
     """
     # Initialization
-    outcomes = pandas.read_csv(path_csv_outcomes, sep=',')
-    outcomes.dropna(inplace=True)
-    outcomes.reset_index(inplace=True, drop=True)
-    name_outcome = outcomes.columns[-1]
-    
+    outcomes = get_binary_outcome_table(pandas.read_csv(path_csv_outcomes, index_col=0), outcome_column)
+    outcomes = outcomes.dropna()
+    name_outcome = outcomes.columns[0]
+
     # Counting the percentage of each class
     class_0_perc = np.sum(outcomes[name_outcome] == 0) / len(outcomes)
     class_1_perc = np.sum(outcomes[name_outcome] == 1) / len(outcomes)
@@ -324,11 +357,13 @@ def create_holdout_set(
                 method: str = 'random',
                 percentage: float = 0.2,
                 n_split: int = 1,
-                seed : int = 1) -> None:
+                seed : int = 1) -> str:
     """
-    Creates a hold-out patient set to be used for final independent testing after a final 
-    model is chosen. All the information is saved in a JSON file.
-    
+    Creates a hold-out patient set to be used for final independent testing after a final
+    model is chosen. The learning and hold-out patient IDs are saved in JSON files
+    (patientsLearn.json and patientsHoldOut.json). The outcome file itself is not copied: pass the
+    same file to the learner with the ``path_outcomes`` argument of ``RadiomicsLearner``.
+
     Args:
         path_outcome_file (str): Full path to where the outcome CSV file is stored.
         outcome_name (str): Name of the outcome. For example, 'OS' for overral survivor.
@@ -341,9 +376,9 @@ def create_holdout_set(
         percentage (float): Percentage of patients to use for the hold-out set. Default is 0.2.
         n_split (int): Number of splits to create. Default is 1.
         seed (int): Seed to use for the random split. Default is 1.
-    
+
     Returns:
-        None.
+        str: Path to the folder of the created split (to be used as ``path_study``).
     """
     # Initilization
     outcome_name = outcome_name.upper()
@@ -361,12 +396,6 @@ def create_holdout_set(
     with open(path_outcome_file, 'r') as infile:
         reader = csv.DictReader(infile, delimiter=',')
         var_names = reader.fieldnames
-
-    # Include time to event if it exists
-    flag_time = False
-    if(outcome_name + '_eventFreeTime' in str(var_names)):
-        name_outcome_in_table_time = outcome_name + '_eventFreeTime'
-        flag_time = True
 
     # Check if the outcome name for binary is correct
     if name_outcome_in_table_binary not in outcome_table.columns:
@@ -407,21 +436,6 @@ def create_holdout_set(
     else:
         raise ValueError('Method not recognized. Use "random" or "all_learn".')
     
-    # Creating final outcome table and saving it
-    if flag_time:
-        outcomes = outcome_table[
-            ['PatientID', name_outcome_in_table_binary, name_outcome_in_table_time]]
-    else:
-        outcomes = outcome_table[['PatientID', name_outcome_in_table_binary]]
-
-    # Finalize the outcome table
-    outcomes = outcomes.dropna(inplace=False)   # Drop NaNs
-    outcomes.reset_index(inplace=True, drop=True)   # Reset index        
-
-    # Save the outcome table
-    paths_exp_outcomes = str(path_split + '/outcomes.csv')
-    outcomes.to_csv(paths_exp_outcomes, index=False)
-
     # Save dict of patientsLearn
     paths_exp_patientsLearn = str(path_split) + '/patientsLearn.json'
     patients_learn.to_json(paths_exp_patientsLearn, orient='values', indent=4)
@@ -430,26 +444,9 @@ def create_holdout_set(
     if method == 'random':
         paths_exp_patients_hold_out = str(path_split) + '/patientsHoldOut.json'
         patients_hold_out.to_json(paths_exp_patients_hold_out, orient='values', indent=4)
-
-        # Save dict of all the paths
-        data={
-            "outcomes" : paths_exp_outcomes,
-            "patientsLearn": paths_exp_patientsLearn,
-            "patientsHoldOut": paths_exp_patients_hold_out,
-            "pathWORK": path_split
-        }
-    else:
-        data={
-            "outcomes" : paths_exp_outcomes,
-            "patientsLearn": paths_exp_patientsLearn,
-            "pathWORK": path_split
-        }
-    paths_exp = str(path_split + '/paths_exp.json')
-    with open(paths_exp, 'w') as f:
-        json.dump(data, f, indent=4)
     
     # Return the path to the experiment and path to split
-    return path_split, paths_exp
+    return path_split
 
 def cross_validation_split(
         outcome: List[Union[int, float]], 
@@ -526,13 +523,18 @@ def find_best_model(path_results: Path, metric: str = 'AUC', second_metric: str 
                 second_metric_best = second_metric_test
                 path_result_best = path_test
     
+    # Check
+    if path_result_best is None:
+        raise ValueError("No model found in the given path.")
+
     # Load best model result dict
     results_dict_best = load_json(path_result_best / 'run_results.json')
 
     # Load model
     model_name = list(results_dict_best.keys())[0]
     with open(path_result_best / f'{model_name}.pickle', 'rb') as file:
-        model = pickle.load(file)
+        import joblib
+        model = joblib.load(file)
     
     return model, results_dict_best
 
@@ -558,15 +560,21 @@ def feature_importance_analysis(path_results: Path):
         pipeline = joblib.load(list_models[0])
 
         # Extract feature names and importances
-        if hasattr(pipeline, 'estimator_') \
-            and hasattr(pipeline.estimator_, 'model_info_') \
-            and hasattr(pipeline.estimator_, 'classifier_') \
-            and hasattr(pipeline.estimator_.classifier_, 'feature_importances_'):
+        classifier = getattr(pipeline.estimator_, 'classifier_', None) if hasattr(pipeline, 'estimator_') else None
+        if hasattr(classifier, 'feature_importances_'):
+            importances = classifier.feature_importances_
+        elif hasattr(classifier, 'coef_'):
+            # Models without feature_importances_ (e.g. logistic regression, linear SVM) expose coef_ instead
+            importances = np.abs(np.ravel(classifier.coef_))
+        else:
+            importances = None
+
+        if importances is not None \
+            and hasattr(pipeline.estimator_, 'model_info_'):
             variables = get_full_rad_names(
-                pipeline.estimator_.model_info_['var_info']['variables']['var_def'], 
+                pipeline.estimator_.model_info_['var_info']['variables']['var_def'],
                 pipeline.estimator_.model_info_['var_names']
             )
-            importances = pipeline.estimator_.classifier_.feature_importances_
 
             # Accumulate importance values for each variable
             for index, var_path in enumerate(variables):
@@ -610,7 +618,9 @@ def get_ml_test_table(estimator: BaseEstimator, variable_table: pd.DataFrame) ->
     """
 
     # retrieve the necessary information from the variable table
-    var_names = estimator.estimator_.model_info_['var_names']
+    # (all input variables of the training table, since the model pipeline does its own feature selection)
+    model_info = estimator.estimator_.model_info_
+    var_names = model_info.get('input_var_names', model_info['var_names'])
     var_def = estimator.estimator_.model_info_['var_info']['variables']['var_def']
 
     # Get the full variable names for training
@@ -968,53 +978,6 @@ def under_sample(outcome_table_binary: pd.DataFrame) -> pd.DataFrame:
     new_ids = patient_ids_min + patient_ids_sample
 
     return outcome_table_binary.loc[new_ids, :]
-
-def save_model(model: Dict, var_id: str, path_model: Path, ml: Dict = None, name_type: str = "") -> Dict:
-    """
-    Saves a given model locally as a pickle object and outputs a dictionary
-    containing the model's information.
-
-    Args:
-        model (Dict): The model dict to save.
-        var_id (str): The stduied variable. For ex: 'var3'.
-        path_model (str): The path to save the model.
-        ml (Dict, optional): Dicionary containing the settings of the machine learning experiment.
-        name_type (str, optional): String specifying the type of the variable. For examlpe: "RadiomicsIntensity". Default is "".
-    
-    Returns:
-        Dict: A dictionary containing the model's information.
-    """
-    # Saving model
-    with open(path_model, "wb") as f:
-        pickle.dump(model, f)
-
-    # Getting the "var_names" string
-    if ml is not None:
-        var_names = ml['variables'][var_id]['nameType']
-    elif name_type != "":
-        var_names = name_type
-    else:
-        var_names = [var_id]
-
-    # Recording model info
-    model_info = dict()
-    model_info['path'] = path_model
-    model_info['var_ids'] = var_id
-    model_info['var_type'] = var_names
-
-    try: # This part may fail if model training failed.
-        model_info['var_names'] = model['var_names']
-        model_info['var_info'] = model['var_info']
-        if 'normalization' in model_info['var_info'].keys():
-            if 'normalization_table' in model_info['var_info']['normalization'].keys():
-                normalization_struct = write_table_structure(model_info['var_info']['normalization']['normalization_table'])
-                model_info['var_info']['normalization']['normalization_table'] = normalization_struct
-        model_info['threshold'] = model['threshold']
-    except Exception as e:
-        print("Failed to create a fully model info")
-        print(e)
-
-    return model_info
 
 def write_table_structure(data_table: pd.DataFrame) -> Dict:
     """

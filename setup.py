@@ -14,7 +14,7 @@ with open('requirements.txt') as f:
 
 setup(
     name="MEDiml",
-    version="0.10.0",
+    version="0.20.0",
     author="MEDomics consortium",
     author_email="medomics.info@gmail.com",
     description="Python Open-source package for medical images processing and radiomic features extraction",
@@ -36,7 +36,12 @@ setup(
         'Programming Language :: Python :: 3.10',
     ],
     keywords='radiomics cancer imaging medical research computational imaging',
-    python_requires='>=3.8,<=3.10',
+    python_requires=">=3.8,<3.11",
     packages=find_packages(exclude=['docs', 'tests']),
-    install_requires=requirements
+    install_requires=requirements,
+    entry_points={
+        'console_scripts': [
+            'radiomics=radiomics:main',
+        ],
+    },
 )

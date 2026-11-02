@@ -1,3 +1,4 @@
+import fnmatch
 import json
 import logging
 import os
@@ -9,6 +10,7 @@ from time import time
 from typing import List, Union
 
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator, ScalarFormatter
 import nibabel as nib
 import numpy as np
 import pandas as pd
@@ -22,12 +24,61 @@ from tqdm import tqdm, trange
 from ..MEDscan import MEDscan
 from ..processing.PETSUVConverter import PETSUVConverter
 from ..processing.segmentation import get_roi_from_indexes
+from ..utils.dicom_dataset import get_dicom_scan_dir
 from ..utils.get_file_paths import get_file_paths
 from ..utils.get_patient_names import get_patient_names
 from ..utils.imref import imref3d
 from ..utils.json_utils import load_json, save_json
+from ..utils.parse_nifti_name import parse_nifti_name
 from ..utils.save_MEDscan import save_MEDscan
 from .ProcessDICOM import ProcessDICOM
+
+
+def _plot_spacing_histogram(ax, values, color, nb_bins=20, rel_tol=1e-3):
+    """Plots a voxel spacing histogram with readable x-axis tick labels.
+
+    Spacings read from image headers often differ only by floating-point noise
+    (e.g. 3.26990 vs 3.26996 mm). Plotting them as-is makes matplotlib zoom on that
+    noise and label the axis with an offset (e.g. "1e-5+3.269"). When the spread is
+    negligible relative to the median spacing, the x-range is widened around the
+    median so the data shows up as a single bar.
+
+    Args:
+        ax (matplotlib.axes.Axes): Axes to draw on.
+        values (array-like): Spacing values (NaNs are ignored).
+        color (str): Histogram color.
+        nb_bins (int, optional): Number of bins. Defaults to 20.
+        rel_tol (float, optional): Spread (max - min) below ``rel_tol * |median|`` is
+            considered negligible. Defaults to 1e-3.
+
+    Returns:
+        None.
+    """
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    lo, hi = values.min(), values.max()
+    center = float(np.median(values))
+    scale = abs(center) if center != 0 else 1.0
+
+    if (hi - lo) <= rel_tol * scale:
+        # Negligible spread: center a wider window on the median. An odd number of
+        # bins keeps the median in the middle of a bin rather than on a bin edge.
+        half_width = 0.05 * scale
+        hist_range = (center - half_width, center + half_width)
+        nb_bins = nb_bins + 1 if nb_bins % 2 == 0 else nb_bins
+    else:
+        hist_range = (lo, hi)
+
+    ax.hist(
+        values, bins=nb_bins, range=hist_range,
+        color=color, alpha=0.80, edgecolor='white', linewidth=0.6
+    )
+    ax.set_xlim(hist_range)
+
+    # Absolute tick values: no offset ("1e-5+3.269") and no scientific notation
+    x_formatter = ScalarFormatter(useOffset=False)
+    x_formatter.set_scientific(False)
+    ax.xaxis.set_major_formatter(x_formatter)
 
 
 class DataManager(object):
@@ -312,19 +363,35 @@ class DataManager(object):
 
         # Distribute the first tasks to all workers
         pds = [ProcessDICOM(
-                        self.__dicom.cell_path_images[i], 
-                        self.__dicom.cell_path_rs[i], 
-                        self.paths._path_save,
-                        self.save)
+                        path_images=self.__dicom.cell_path_images[i], 
+                        path_rs=self.__dicom.cell_path_rs[i], 
+                        path_save=self.paths._path_save,
+                        save=self.save)
             for i in range(n_batch)]
         
-        ids = [pd.process_files() for pd in pds]
+        processed = [pd.process_files() for pd in pds]
+
+        nb_job_left = n_scans - n_batch
+
+        # Distribute the remaining tasks
+        for _ in trange(nb_job_left):
+            idx = n_scans - nb_job_left
+            pd = ProcessDICOM(
+                    path_images=self.__dicom.cell_path_images[idx], 
+                    path_rs=self.__dicom.cell_path_rs[idx],
+                    path_save=self.paths._path_save,
+                    save=self.save
+                )
+            processed.extend([pd.process_files()])
+
+        # Drop empty results (in case of errors)
+        processed = [result for result in processed if result]
 
         # Update the path to the created instances
         if self.save:
-            for name_save in ray.get(ids):
+            for name_save in processed:
                 if self.paths._path_save:
-                    self.path_to_objects.append(str(self.paths._path_save / name_save))
+                    self.path_to_objects.extend(str(self.paths._path_save / name_save))
                 # Update processing summary
                 if name_save.split('_')[0].count('-') >= 2:
                     scan_type = name_save[name_save.find('__')+2 : name_save.find('.')]
@@ -345,51 +412,9 @@ class DataManager(object):
                 else:
                     logging.warning(f"The patient ID of the following file: {name_save} does not respect the MEDiml "\
                         "naming convention 'study-institution-id' (Ex: Glioma-TCGA-001)")
+        else:
+            return processed
 
-        nb_job_left = n_scans - n_batch
-
-        return ray.get(ids) if not self.save else None
-
-        # Distribute the remaining tasks
-        for _ in trange(n_scans):
-            _, ids = ray.wait(ids, num_returns=1)
-            if nb_job_left > 0:
-                idx = n_scans - nb_job_left
-                pd = ProcessDICOM(
-                        self.__dicom.cell_path_images[idx], 
-                        self.__dicom.cell_path_rs[idx], 
-                        self.paths._path_save,
-                        self.save)
-                ids.extend([pd.process_files()])
-                nb_job_left -= 1
-
-            # Update the path to the created instances
-            if self.save:
-                for name_save in ray.get(ids):
-                    if self.paths._path_save:
-                        self.path_to_objects.extend(str(self.paths._path_save / name_save))
-                    # Update processing summary
-                    if name_save.split('_')[0].count('-') >= 2:
-                        scan_type = name_save[name_save.find('__')+2 : name_save.find('.')]
-                        if name_save.split('-')[0] not in self.__studies:
-                            self.__studies.append(name_save.split('-')[0])  # add new study
-                        if name_save.split('-')[1] not in self.__institutions:
-                            self.__institutions.append(name_save.split('-')[1])  # add new study
-                        if name_save.split('-')[0] not in self.summary:
-                            self.summary[name_save.split('-')[0]] = {}
-                        if name_save.split('-')[1] not  in self.summary[name_save.split('-')[0]]:
-                            self.summary[name_save.split('-')[0]][name_save.split('-')[1]] = {}  # add new institution
-                        if scan_type not in self.__scans:
-                            self.__scans.append(scan_type)
-                        if scan_type not in self.summary[name_save.split('-')[0]][name_save.split('-')[1]]:
-                            self.summary[name_save.split('-')[0]][name_save.split('-')[1]][scan_type] = []
-                        if name_save not in self.summary[name_save.split('-')[0]][name_save.split('-')[1]][scan_type]:
-                            self.summary[name_save.split('-')[0]][name_save.split('-')[1]][scan_type].append(name_save)
-                    else:
-                        logging.warning(f"The patient ID of the following file: {name_save} does not respect the MEDiml "\
-                            "naming convention 'study-institution-id' (Ex: Glioma-TCGA-001)")
-            else:
-                return ray.get(ids)
         print('DONE')
 
     def __read_all_niftis(self) -> None:
@@ -467,7 +492,18 @@ class DataManager(object):
                 roi_index += 1
         else:
             _id = image_file.name.split("(")[0] if ("(") in image_file.name else image_file.name # id is PatientID__ImagingScanName
-            load_mask(_id, path_roi_data, medscan)
+
+            # Check the path type
+            if path_roi_data.is_dir():
+                for file in path_roi_data.rglob('*.nii*'):
+                    if file.name.startswith(_id) and 'ROI' in file.name.split("."):
+                        load_mask(_id, file, medscan)
+                        roi_index += 1
+            elif path_roi_data.name.startswith(_id) and 'ROI' in path_roi_data.name.split("."):
+                load_mask(_id, path_roi_data, medscan)
+            else:
+                raise ValueError(f"The ROI file for patient ID: {_id} "
+                    f"was not found in the given path: {path_roi_data} or was not correctly named.")
 
         return medscan
 
@@ -525,15 +561,16 @@ class DataManager(object):
 
         Args:
             nifti_file (Union[Path, str]): Path to the NIfTI file.
-            path_data (Union[Path, str]): Path to the data.
+            path_data (Union[Path, str]): Path to the data where associated files are located.
         
         Returns:
             MEDscan: MEDscan class instance.
         """
         medscan = MEDscan()
-        medscan.patientID = os.path.basename(nifti_file).split("_")[0]
-        medscan.type = os.path.basename(nifti_file).split(".")[-3]
-        medscan.series_description = nifti_file.name[nifti_file.name.find('__') + 2: nifti_file.name.find('(')]
+        patient_id, scan_name, _, modality = parse_nifti_name(nifti_file)
+        medscan.patientID = patient_id
+        medscan.type = modality
+        medscan.series_description = scan_name
         medscan.format = "nifti"
         medscan.data.set_orientation(orientation="Axial")
         medscan.data.set_patient_position(patient_position="HFS")
@@ -574,71 +611,102 @@ class DataManager(object):
         print('--> Reading all NIfTI objects (imaging volumes & masks) to create MEDscan classes')
         list_instances = []
         for file in tqdm(self.__nifti.stack_path_images):
-            # Assert the list of instances does not exceed the a size of 10
-            if len(list_instances) >= 10:
-                print('The number of MEDscan instances exceeds 10, please consider saving the instances')
-                break
-            # INITIALIZE MEDscan INSTANCE AND UPDATE ATTRIBUTES
-            medscan = MEDscan()
-            medscan.patientID = os.path.basename(file).split("_")[0]
-            medscan.type = os.path.basename(file).split(".")[-3]
-            medscan.series_description = file.name[file.name.find('__') + 2: file.name.find('(')] if '__' in file.name else ""
-            medscan.format = "nifti"
-            medscan.data.set_orientation(orientation="Axial")
-            medscan.data.set_patient_position(patient_position="HFS")
-            medscan.data.volume.array = nib.load(file).get_fdata()
-            
-            # RAS to LPS
-            #medscan.data.volume.convert_to_LPS()
-            medscan.data.volume.scan_rot = None
-            
-            # Update spatialRef
-            medscan = self.__associate_spatialRef(file, medscan)
-            
-            # Get ROI
-            medscan = self.__associate_roi_to_image(file, medscan, nib.load(file))
+            try:
+                # Assert the list of instances does not exceed the a size of 10
+                if len(list_instances) >= 10:
+                    print('The number of MEDscan instances exceeds 10, please consider saving the instances')
+                    break
+                # INITIALIZE MEDscan INSTANCE AND UPDATE ATTRIBUTES
+                medscan = MEDscan()
+                medscan.patientID = os.path.basename(file).split("_")[0]
+                medscan.type = os.path.basename(file).split(".")[-3]
+                medscan.series_description = file.name[file.name.find('__') + 2: file.name.find('(')] if '__' in file.name else ""
+                medscan.format = "nifti"
+                medscan.data.set_orientation(orientation="Axial")
+                medscan.data.set_patient_position(patient_position="HFS")
+                medscan.data.volume.array = nib.load(file).get_fdata()
+                
+                # RAS to LPS
+                #medscan.data.volume.convert_to_LPS()
+                medscan.data.volume.scan_rot = None
+                
+                # Update spatialRef
+                medscan = self.__associate_spatialRef(file, medscan)
+                
+                # Get ROI
+                medscan = self.__associate_roi_to_image(file, medscan, nib.load(file))
 
-            # SAVE MEDscan INSTANCE
-            if self.save and self.paths._path_save:
-                save_MEDscan(medscan, self.paths._path_save)
-            else:
-                list_instances.append(medscan)
-            
-            # Update the path to the created instances
-            name_save = self.__get_MEDscan_name_save(medscan)
+                # SAVE MEDscan INSTANCE
+                if self.save and self.paths._path_save:
+                    save_MEDscan(medscan, self.paths._path_save)
+                else:
+                    list_instances.append(medscan)
+                
+                # Update the path to the created instances
+                name_save = self.__get_MEDscan_name_save(medscan)
 
-            # Clear memory
-            del medscan
+                # Clear memory
+                del medscan
 
-            # Update the path to the created instances
-            if self.paths._path_save:
-                self.path_to_objects.append(str(self.paths._path_save / name_save))
-            
-            # Update processing summary
-            if name_save.split('_')[0].count('-') >= 2:
-                scan_type = name_save[name_save.find('__')+2 : name_save.find('.')]
-                if name_save.split('-')[0] not in self.__studies:
-                    self.__studies.append(name_save.split('-')[0])  # add new study
-                if name_save.split('-')[1] not in self.__institutions:
-                    self.__institutions.append(name_save.split('-')[1])  # add new institution
-                if name_save.split('-')[0] not in self.summary:
-                    self.summary[name_save.split('-')[0]] = {}  # add new study to summary
-                if name_save.split('-')[1] not  in self.summary[name_save.split('-')[0]]:
-                    self.summary[name_save.split('-')[0]][name_save.split('-')[1]] = {}  # add new institution
-                if scan_type not in self.__scans:
-                    self.__scans.append(scan_type)
-                if scan_type not in self.summary[name_save.split('-')[0]][name_save.split('-')[1]]:
-                    self.summary[name_save.split('-')[0]][name_save.split('-')[1]][scan_type] = []
-                if name_save not in self.summary[name_save.split('-')[0]][name_save.split('-')[1]][scan_type]:
-                    self.summary[name_save.split('-')[0]][name_save.split('-')[1]][scan_type].append(name_save)
-            else:
-                if self.save:
-                    logging.warning(f"The patient ID of the following file: {name_save} does not respect the MEDiml "\
-                        "naming convention 'study-institution-id' (Ex: Glioma-TCGA-001)")
+                # Update the path to the created instances
+                if self.paths._path_save:
+                    self.path_to_objects.append(str(self.paths._path_save / name_save))
+                
+                # Update processing summary
+                if name_save.split('_')[0].count('-') >= 2:
+                    scan_type = name_save[name_save.find('__')+2 : name_save.find('.')]
+                    if name_save.split('-')[0] not in self.__studies:
+                        self.__studies.append(name_save.split('-')[0])  # add new study
+                    if name_save.split('-')[1] not in self.__institutions:
+                        self.__institutions.append(name_save.split('-')[1])  # add new institution
+                    if name_save.split('-')[0] not in self.summary:
+                        self.summary[name_save.split('-')[0]] = {}  # add new study to summary
+                    if name_save.split('-')[1] not  in self.summary[name_save.split('-')[0]]:
+                        self.summary[name_save.split('-')[0]][name_save.split('-')[1]] = {}  # add new institution
+                    if scan_type not in self.__scans:
+                        self.__scans.append(scan_type)
+                    if scan_type not in self.summary[name_save.split('-')[0]][name_save.split('-')[1]]:
+                        self.summary[name_save.split('-')[0]][name_save.split('-')[1]][scan_type] = []
+                    if name_save not in self.summary[name_save.split('-')[0]][name_save.split('-')[1]][scan_type]:
+                        self.summary[name_save.split('-')[0]][name_save.split('-')[1]][scan_type].append(name_save)
+                else:
+                    if self.save:
+                        logging.warning(f"The patient ID of the following file: {name_save} does not respect the MEDiml "\
+                            "naming convention 'study-institution-id' (Ex: Glioma-TCGA-001)")
+            except Exception as e:
+                print(f'Error while processing: {file}, error: {e}\n')
         print('DONE')
 
         if list_instances:
             return list_instances
+
+    def process_one_dicom(self) -> MEDscan:
+        """Processes one DICOM file to create a MEDscan class instance.
+
+        Args:
+            path_image (Union[Path, str]): Path to the DICOM image data.
+            path_mask (Union[Path, str]): Path to the DICOM mask data.
+        
+        Returns:
+            MEDscan: MEDscan class instance.
+        """
+        self.__read_all_dicoms()
+
+        # Ensure only one image and one mask are given
+        if len(self.__dicom.cell_path_images) > 1 or len(self.__dicom.cell_path_rs) > 1:
+            raise ValueError("More than one image or mask found, please make sure the folder provided contains a single scan.")
+
+        medscan = ProcessDICOM(
+            self.__dicom.cell_path_images[0],
+            self.__dicom.cell_path_rs[0],
+            save=False
+        ).process_files()
+
+        # SAVE MEDscan INSTANCE
+        if self.save and self.paths._path_save:
+            save_MEDscan(medscan, self.paths._path_save)
+
+        return medscan
 
     def process_one_nifti(self, path_image: Union[Path, str], path_mask: Union[Path, str]) -> MEDscan:
         """Processes one NIfTI file to create a MEDscan class instance.
@@ -669,10 +737,12 @@ class DataManager(object):
             None
         """
         if not (path_csv or self.paths._path_csv):
-            print('No csv provided, no updates will be made')
+            print('No csv provided, the summary will not be broken down by ROI type')
+            self.csv_data = None
+            self.summarize()
         else:
             if path_csv:
-                self.paths._path_csv = path_csv
+                self.paths._path_csv = Path(path_csv)
             # Extract roi type label from csv file name
             name_csv = self.paths._path_csv.name
             roi_type_label = name_csv[name_csv.find('_')+1 : name_csv.find('.')]
@@ -763,13 +833,113 @@ class DataManager(object):
         if retrun_summary:
             return summary_df
 
+    def __adapt_wildcard_for_format(
+            self,
+            wildcard: str,
+            use_dicoms: bool,
+            use_niftis: bool
+        ) -> str:
+        if use_dicoms:
+            for ext in ('.npy', '.nii.gz', '.nii'):
+                wildcard = wildcard.replace(ext, '.dcm')
+            return wildcard
+        if use_niftis:
+            for ext in ('.npy', '.dcm'):
+                wildcard = wildcard.replace(ext, '.nii*')
+            return wildcard
+        for ext in ('.dcm', '.nii.gz', '.nii'):
+            wildcard = wildcard.replace(ext, '.npy')
+        return wildcard
+
+    def __filter_file_paths_by_format(
+            self,
+            file_paths: List[Path],
+            use_dicoms: bool,
+            use_niftis: bool
+        ) -> List[Path]:
+        if use_dicoms:
+            return [f for f in file_paths if f.name.endswith('.dcm')]
+        if use_niftis:
+            return [f for f in file_paths if f.name.endswith('.nii') or f.name.endswith('.nii.gz')]
+        return [f for f in file_paths if f.name.endswith('.npy')]
+
+    def __get_pre_radiomics_file_paths(
+            self,
+            path_data: Union[Path, str],
+            wildcard: str,
+            use_dicoms: bool,
+            use_niftis: bool
+        ) -> List[Path]:
+        wildcard = self.__adapt_wildcard_for_format(wildcard, use_dicoms, use_niftis)
+        if path_data:
+            path_search = path_data
+        elif self.paths._path_save:
+            path_search = self.paths._path_save
+        else:
+            raise ValueError("Path data is invalid.")
+        if use_dicoms:
+            return self.__get_dicom_scan_dirs(path_search, wildcard)
+        file_paths = get_file_paths(path_search, wildcard)
+        return self.__filter_file_paths_by_format(file_paths, use_dicoms, use_niftis)
+
+    def __get_dicom_scan_dirs(self, path_search: Union[Path, str], wildcard: str) -> List[Path]:
+        """Returns the folders of the DICOM scans (one folder per 3D volume) matching the wildcard.
+
+        The DICOM dataset must be organized as ``path_search/PatientID/Modality/ImagingScanName/{images,masks}/*.dcm``
+        (``path_search/PatientID/Modality/{images,masks}/*.dcm`` if the sequence is unknown).
+
+        Args:
+            path_search (Union[Path, str]): Path to the DICOM dataset.
+            wildcard (str): Wildcard matched against the whole path of the DICOM files.
+
+        Returns:
+            List[Path]: Sorted list of the scan folders.
+        """
+        path_search = Path(path_search)
+        dicom_files = get_file_paths(path_search, '*.dcm')
+        if not dicom_files:
+            raise ValueError(f"No DICOM file (.dcm) was found in: {path_search}")
+        # Each DICOM file is a single slice, so it must be located in a "PatientID/Modality/ImagingScanName"
+        # (or "PatientID/Modality") folder holding the whole 3D volume.
+        scan_dirs = {f: get_dicom_scan_dir(f) for f in dicom_files}
+        misplaced = [f for f, d in scan_dirs.items() if len(d.relative_to(path_search).parts) not in (2, 3)]
+        if misplaced:
+            raise ValueError(
+                f"The DICOM dataset in {path_search} is not organized by patients and imaging scans "
+                f"({len(misplaced)} DICOM file(s) misplaced, e.g. {misplaced[0]}). The expected structure is "
+                "'path_data/PatientID/Modality/ImagingScanName/{images,masks}/*.dcm', where each patient, "
+                "each imaging modality and each imaging scan (sequence) is a sub-folder. Please organize your "
+                "DICOM dataset using the script 'scripts/organize_dataset.py' before running the radiomics pre-checks."
+            )
+        # DICOM file names rarely carry useful info (e.g. modality), so the
+        # wildcard is matched against the whole file path instead.
+        return sorted({scan_dirs[f] for f in dicom_files if fnmatch.fnmatch(str(f), wildcard)})
+
+    def __load_medscan_for_pre_radiomics_checks(
+            self,
+            file_path: Path,
+            path_data: Union[Path, str],
+            use_dicoms: bool,
+            use_niftis: bool
+        ):
+        if use_dicoms:
+            return DataManager(path_to_dicoms=file_path).process_one_dicom()
+        if use_niftis:
+            if 'ROI' in file_path.name.split("."):
+                return None
+            return self.__process_one_nifti(file_path, path_data)
+        with open(file_path, 'rb') as file:
+            return pickle.load(file)
+
     def __pre_radiomics_checks_dimensions(
-        self,
-        path_data: Union[Path, str] = None,
-        wildcards_dimensions: List[str] = [],
-        min_percentile: float = 0.05,
-        max_percentile: float = 0.95,
-        save: bool = False
+            self,
+            path_data: Union[Path, str] = None,
+            wildcards_dimensions: List[str] = [],
+            min_percentile: float = 0.05,
+            max_percentile: float = 0.95,
+            use_dicoms: bool = False,
+            use_niftis: bool = False,
+            save: bool = False
         ) -> None:
         """Finds proper voxels dimension options for radiomics analyses for a group of scans
 
@@ -781,6 +951,8 @@ class DataManager(object):
                 :ref:`this link <https://www.linuxtechtips.com/2013/11/how-wildcards-work-in-linux-and-unix.html>`.
             min_percentile (float, optional): Minimum percentile to use for the histograms. Defaults to 0.05.
             max_percentile (float, optional): Maximum percentile to use for the histograms. Defaults to 0.95.
+            use_dicoms (bool, optional): Load DICOM files (``.dcm``). Defaults to False.
+            use_niftis (bool, optional): Load NIfTI files (``.nii`` / ``.nii.gz``). Defaults to False.
             save (bool, optional): If True, will save the results in a json file. Defaults to False.
         
         Returns:
@@ -813,9 +985,13 @@ class DataManager(object):
             print("Wildcard is empty, the pre-checks will be aborted")
             return
 
-        # Updating plotting params
-        plt.rcParams["figure.figsize"] = (20,20)
-        plt.rcParams.update({'font.size': 22})
+        # Plotting style
+        plt.rcParams["figure.figsize"] = (12, 5)
+        plt.rcParams.update({"font.size": 12})
+        _HIST_COLOR   = "#4472C4"
+        _PMIN_COLOR   = "#E74C3C"
+        _PMAX_COLOR   = "#27AE60"
+        _MED_COLOR    = "#F39C12"
 
         # TODO: seperate by studies and scan type (MRscan, CTscan...)
         # TODO: Two summaries (df, list of names saves) -> 
@@ -823,12 +999,9 @@ class DataManager(object):
         file_paths = list()
         for w in range(len(wildcards_dimensions)):
             wildcard = wildcards_dimensions[w]
-            if path_data:
-                file_paths = get_file_paths(path_data, wildcard)
-            elif self.paths._path_save:
-                file_paths = get_file_paths(self.paths._path_save, wildcard)
-            else:
-                raise ValueError("Path data is invalid.")
+            file_paths = self.__get_pre_radiomics_file_paths(
+                path_data, wildcard, use_dicoms, use_niftis
+            )
             n_files = len(file_paths)
             xy_dim["data"] = np.zeros((n_files, 1))
             xy_dim["data"] = np.multiply(xy_dim["data"], np.nan)
@@ -836,18 +1009,22 @@ class DataManager(object):
             z_dim["data"] = np.multiply(z_dim["data"], np.nan)
             for f in tqdm(range(len(file_paths))):
                 try:
-                    if file_paths[f].name.endswith("nii.gz") or file_paths[f].name.endswith("nii"):
-                        with open(file_paths[f], 'rb') as file:
-                            medscan = pickle.load(file)
-                        xy_dim["data"][f] = medscan.header.get_zooms()[0]
-                        z_dim["data"][f]  = medscan.header.get_zooms()[2]
-                    else:
-                        with open(file_paths[f], 'rb') as file:
-                            medscan = pickle.load(file)
-                        xy_dim["data"][f] = medscan.data.volume.spatialRef.PixelExtentInWorldX
-                        z_dim["data"][f]  = medscan.data.volume.spatialRef.PixelExtentInWorldZ
+                    medscan = self.__load_medscan_for_pre_radiomics_checks(
+                        file_paths[f], path_data, use_dicoms, use_niftis
+                    )
+                    if medscan is None:
+                        continue
+                    xy_dim["data"][f] = medscan.data.volume.spatialRef.PixelExtentInWorldX
+                    z_dim["data"][f]  = medscan.data.volume.spatialRef.PixelExtentInWorldZ
                 except Exception as e:
-                    print(e)
+                    print(f'Error while processing: {file_paths[f]}, error: {e}\n')
+                    continue
+            
+            # Safe check
+            if all(np.isnan(xy_dim["data"])) or all(np.isnan(z_dim["data"])):
+                print(f"All xy-spacing or z-spacing data are NaN for the following wildcard: {wildcard}," \
+                    " the pre-checks will be aborted")
+                continue
 
             # Running analysis
             xy_dim["data"] = np.concatenate(xy_dim["data"])
@@ -856,74 +1033,144 @@ class DataManager(object):
             xy_dim["std"] = np.std(xy_dim["data"][~np.isnan(xy_dim["data"])])
             xy_dim["min"] = np.min(xy_dim["data"][~np.isnan(xy_dim["data"])])
             xy_dim["max"] = np.max(xy_dim["data"][~np.isnan(xy_dim["data"])])
-            xy_dim[f"p{min_percentile}"] = np.percentile(xy_dim["data"][~np.isnan(xy_dim["data"])], 
-                                                        min_percentile)
-            xy_dim[f"p{max_percentile}"] = np.percentile(xy_dim["data"][~np.isnan(xy_dim["data"])], 
-                                                        max_percentile)
+            # np.percentile expects [0, 100] while percentiles are given in [0, 1]
+            xy_dim[f"p{min_percentile}"] = np.percentile(xy_dim["data"][~np.isnan(xy_dim["data"])],
+                                                        min_percentile * 100)
+            xy_dim[f"p{max_percentile}"] = np.percentile(xy_dim["data"][~np.isnan(xy_dim["data"])],
+                                                        max_percentile * 100)
             z_dim["mean"] = np.mean(z_dim["data"][~np.isnan(z_dim["data"])])
             z_dim["median"] = np.median(z_dim["data"][~np.isnan(z_dim["data"])])
             z_dim["std"] = np.std(z_dim["data"][~np.isnan(z_dim["data"])])
             z_dim["min"] = np.min(z_dim["data"][~np.isnan(z_dim["data"])])
             z_dim["max"] = np.max(z_dim["data"][~np.isnan(z_dim["data"])])
-            z_dim[f"p{min_percentile}"] = np.percentile(z_dim["data"][~np.isnan(z_dim["data"])], 
-                                                        min_percentile)
-            z_dim[f"p{max_percentile}"] = np.percentile(z_dim["data"][~np.isnan(z_dim["data"])], max_percentile)
+            z_dim[f"p{min_percentile}"] = np.percentile(z_dim["data"][~np.isnan(z_dim["data"])],
+                                                        min_percentile * 100)
+            z_dim[f"p{max_percentile}"] = np.percentile(z_dim["data"][~np.isnan(z_dim["data"])],
+                                                        max_percentile * 100)
             xy_dim["data"] = xy_dim["data"].tolist()
             z_dim["data"] = z_dim["data"].tolist()
-            
-            # Plotting xy-spacing data histogram
+
+            # Plot: xy-spacing histogram 
             df_xy = pd.DataFrame(xy_dim["data"], columns=['data'])
             del xy_dim["data"]  # no interest in keeping data (we only need statistics)
-            ax = df_xy.hist(column='data')
-            min_quant, max_quant, median = df_xy.quantile(min_percentile), df_xy.quantile(max_percentile), df_xy.median()
-            for x in ax[0]:
-                x.axvline(min_quant.data, linestyle=':', color='r', label=f"Min Percentile: {float(min_quant):.3f}")
-                x.axvline(max_quant.data, linestyle=':', color='g', label=f"Max Percentile: {float(max_quant):.3f}")
-                x.axvline(median.data, linestyle='solid', color='gold', label=f"Median: {float(median.data):.3f}")
-                x.grid(False)
-                plt.title(f"Voxels xy-spacing checks for {wildcard}")
-                plt.legend()
-                # Save the plot
-                if save:
-                    plt.savefig(self.paths._path_save_checks / ('Voxels_xy_check.png'))
+            min_quant, max_quant, median = (
+                df_xy.quantile(min_percentile),
+                df_xy.quantile(max_percentile),
+                df_xy.median()
+            )
+
+            fig, ax = plt.subplots(1, 1, figsize=(12, 5))
+            _plot_spacing_histogram(ax, df_xy['data'], color=_HIST_COLOR)
+            ax.axvline(
+                min_quant.data, linestyle='--', color=_PMIN_COLOR, linewidth=1.8,
+                label=f"p{int(min_percentile * 100)}: {float(min_quant):.3f} mm"
+            )
+            ax.axvline(
+                max_quant.data, linestyle='--', color=_PMAX_COLOR, linewidth=1.8,
+                label=f"p{int(max_percentile * 100)}: {float(max_quant):.3f} mm"
+            )
+            ax.axvline(
+                median.data, linestyle='-', color=_MED_COLOR, linewidth=2.0,
+                label=f"Median: {float(median.data):.3f} mm"
+            )
+            ax.set_xlabel("Voxel Spacing (mm)", fontsize=12)
+            ax.set_ylabel("Count", fontsize=12)
+            ax.set_title(
+                f"Voxels xy-Spacing Distribution — {wildcard}",
+                fontsize=13, fontweight='bold', pad=10
+            )
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            ax.yaxis.grid(True, linestyle='--', alpha=0.4, color='grey')
+            ax.set_axisbelow(True)
+            ax.legend(frameon=False, fontsize=11)
+            fig.tight_layout()
+            if save:
+                if not self.paths._path_save_checks:
+                    print("Warning: save is set to True but the path to save checks is not defined, the figure will not be saved")
                 else:
-                    plt.show()
-            
-            # Plotting z-spacing data histogram
+                    fig.savefig(
+                        self.paths._path_save_checks / 'Voxels_xy_check.png',
+                        dpi=150, bbox_inches='tight'
+                    )
+            else:
+                plt.show()
+            plt.close(fig)
+
+            # Plot: z-spacing histogram
             df_z = pd.DataFrame(z_dim["data"], columns=['data'])
             del z_dim["data"]  # no interest in keeping data (we only need statistics)
-            ax = df_z.hist(column='data')
-            min_quant, max_quant, median = df_z.quantile(min_percentile), df_z.quantile(max_percentile), df_z.median()
-            for x in ax[0]:
-                x.axvline(min_quant.data, linestyle=':', color='r', label=f"Min Percentile: {float(min_quant):.3f}")
-                x.axvline(max_quant.data, linestyle=':', color='g', label=f"Max Percentile: {float(max_quant):.3f}")
-                x.axvline(median.data, linestyle='solid', color='gold', label=f"Median: {float(median.data):.3f}")
-                x.grid(False)
-                plt.title(f"Voxels z-spacing checks for {wildcard}")
-                plt.legend()
-                # Save the plot
-                if save:
-                    plt.savefig(self.paths._path_save_checks / ('Voxels_z_check.png'))
+            min_quant, max_quant, median = (
+                df_z.quantile(min_percentile),
+                df_z.quantile(max_percentile),
+                df_z.median()
+            )
+
+            fig, ax = plt.subplots(1, 1, figsize=(12, 5))
+            _plot_spacing_histogram(ax, df_z['data'], color=_HIST_COLOR)
+            ax.axvline(
+                min_quant.data, linestyle='--', color=_PMIN_COLOR, linewidth=1.8,
+                label=f"p{int(min_percentile * 100)}: {float(min_quant):.3f} mm"
+            )
+            ax.axvline(
+                max_quant.data, linestyle='--', color=_PMAX_COLOR, linewidth=1.8,
+                label=f"p{int(max_percentile * 100)}: {float(max_quant):.3f} mm"
+            )
+            ax.axvline(
+                median.data, linestyle='-', color=_MED_COLOR, linewidth=2.0,
+                label=f"Median: {float(median.data):.3f} mm"
+            )
+            ax.set_xlabel("Voxel Spacing (mm)", fontsize=12)
+            ax.set_ylabel("Count", fontsize=12)
+            ax.set_title(
+                f"Voxels z-Spacing Distribution — {wildcard}",
+                fontsize=13, fontweight='bold', pad=10
+            )
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            ax.yaxis.grid(True, linestyle='--', alpha=0.4, color='grey')
+            ax.set_axisbelow(True)
+            ax.legend(frameon=False, fontsize=11)
+            fig.tight_layout()
+            if save:
+                if not self.paths._path_save_checks:
+                    print("Warning: save is set to True but the path to save checks is not defined, the figure will not be saved")
                 else:
-                    plt.show()
+                    fig.savefig(
+                        self.paths._path_save_checks / 'Voxels_z_check.png',
+                        dpi=150, bbox_inches='tight'
+                    )
+            else:
+                plt.show()
+            plt.close(fig)
                 
             # Saving files using wildcard for name
             if save:
-                wildcard = str(wildcard).replace('*', '').replace('.npy', '.json')
-                save_json(self.paths._path_save_checks / ('xyDim_' + wildcard), xy_dim, cls=NumpyEncoder)
-                save_json(self.paths._path_save_checks / ('zDim_' + wildcard), z_dim, cls=NumpyEncoder)
+                if not self.paths._path_save_checks:
+                    print("Warning: save is set to True but the path to save checks is not defined, the checks will not be saved")
+                else:
+                    wildcard = str(wildcard).replace('*', '')
+                    if '.npy' in wildcard:
+                        wildcard = wildcard.replace('.npy', '')
+                    elif not wildcard.endswith('.json'):
+                        wildcard += '.json'
+                    save_json(self.paths._path_save_checks / ('xyDim_' + wildcard), xy_dim, cls=NumpyEncoder)
+                    save_json(self.paths._path_save_checks / ('zDim_' + wildcard), z_dim, cls=NumpyEncoder)
+
 
     def __pre_radiomics_checks_window(
-        self,
-        path_data: Union[str, Path] = None,
-        wildcards_window: List = [], 
-        path_csv: Union[str, Path] = None,
-        min_percentile: float = 0.05,
-        max_percentile: float = 0.95,
-        bin_width: int = 0,
-        hist_range: list = [],
-        nifti: bool = True,
-        save: bool = False
+            self,
+            path_data: Union[str, Path] = None,
+            wildcards_window: List = [], 
+            path_csv: Union[str, Path] = None,
+            min_percentile: float = 0.05,
+            max_percentile: float = 0.95,
+            bin_width: int = 0,
+            hist_range: list = [],
+            compute_suv_map: bool = False,
+            use_dicoms: bool = False,
+            use_niftis: bool = False,
+            save: bool = False
         ) -> None:
         """Finds proper re-segmentation ranges options for radiomics analyses for a group of scans
 
@@ -934,54 +1181,49 @@ class DataManager(object):
                 that will be analyzed. You can learn more about wildcards in
                 :ref:`this link <https://www.linuxtechtips.com/2013/11/how-wildcards-work-in-linux-and-unix.html>`.
             path_csv(Union[str, Path], optional): Path to a csv file containing a list of the scans that will be
-                analyzed (a CSV file for a single ROI type).
+                analyzed (a CSV file for a single ROI type). If not given, all the scans found in
+                ``path_data`` are analyzed, using the union of all the ROIs of each scan.
             min_percentile (float, optional): Minimum percentile to use for the histograms. Defaults to 0.05.
             max_percentile (float, optional): Maximum percentile to use for the histograms. Defaults to 0.95.
             bin_width(int, optional): Width of the bins for the histograms. If not provided, will use the 
                 default number of bins in the method 
                 :ref:`pandas.DataFrame.hist <https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.hist.html>`: 10 bins.
             hist_range(list, optional): Range of the histograms. If empty, will use the minimum and maximum values.
-            nifti(bool, optional): If True, will use the NIfTI files, otherwise will use the numpy files.
+            compute_suv_map(bool, optional): Whether to compute the SUV map for PET scans that do not have SUV values.
+            use_dicoms (bool, optional): Load DICOM files (``.dcm``). Defaults to False.
+            use_niftis (bool, optional): Load NIfTI files (``.nii`` / ``.nii.gz``). Defaults to False.
             save (bool, optional): If True, will save the results in a json file. Defaults to False.
         
         Returns:
             None.
         """
-        # Updating plotting params
-        plt.rcParams["figure.figsize"] = (20,20)
-        plt.rcParams.update({'font.size': 22})
+        # Plotting style
+        plt.rcParams["figure.figsize"] = (14, 5)
+        plt.rcParams.update({"font.size": 12})
+        _HIST_COLOR   = "#4472C4"
+        _PMIN_COLOR   = "#E74C3C"
+        _PMAX_COLOR   = "#27AE60"
         
         if type(wildcards_window) is str:
             wildcards_window = [wildcards_window]
 
         if len(wildcards_window) == 0:
-            print("Wilcards is empty")
-            return
-        if path_csv:
+            raise ValueError("Wildcard is empty, the pre-checks will be aborted")
+        # The ROI CSV file is optional. Without it, all the scans found in the given path
+        # are analyzed, using the union of all the ROIs of each scan.
+        if path_csv is not None:
             self.paths._path_csv = Path(path_csv)
-        roi_table = pd.read_csv(self.paths._path_csv)
-        if nifti:
-            roi_table['under'] = '_'
-            roi_table['dot'] = '.'
-            roi_table['roi_label'] = 'GTV'
-            roi_table['oparenthesis'] = '('
-            roi_table['cparenthesis'] = ')'
-            roi_table['ext'] = '.nii.gz'
-            patient_names = (pd.Series(
-                roi_table[['PatientID', 'under', 'under',
-                        'ImagingScanName',
-                        'oparenthesis',
-                        'roi_label',
-                        'cparenthesis',
-                        'dot',
-                        'ImagingModality',
-                        'ext']].fillna('').values.tolist()).str.join('')).tolist()
+        roi_table = None
+        if self.paths._path_csv is not None:
+            roi_table = pd.read_csv(self.paths._path_csv)
+            for col in ['PatientID', 'ImagingScanName', 'ImagingModality', 'ROIname']:
+                if col not in list(roi_table.columns):
+                    raise ValueError(
+                        f'Missing column "{col}" in the ROI CSV file: {self.paths._path_csv}. Please check '
+                        'that the CSV file contains all the required columns: "PatientID", '
+                        '"ImagingScanName", "ImagingModality" and "ROIname".')
         else:
-            roi_names = [[], [], []]
-            roi_names[0] = roi_table['PatientID']
-            roi_names[1] = roi_table['ImagingScanName']
-            roi_names[2] = roi_table['ImagingModality']
-            patient_names = get_patient_names(roi_names)
+            print("No ROI CSV file given, the union of all the ROIs of each scan will be used.")
         for w in range(len(wildcards_window)):
             temp_val = []
             temp = []
@@ -997,32 +1239,44 @@ class DataManager(object):
                 f"p{max_percentile}": []
             }
             wildcard = wildcards_window[w]
-            if path_data:
-                file_paths = get_file_paths(path_data, wildcard)
-            elif self.paths._path_save:
+            if not path_data and self.paths._path_save:
                 path_data = self.paths._path_save
-                file_paths = get_file_paths(self.paths._path_save, wildcard)
-            else:
-                raise ValueError("Path data is invalid.")
+            file_paths = self.__get_pre_radiomics_file_paths(
+                path_data, wildcard, use_dicoms, use_niftis
+            )
             n_files = len(file_paths)
             i = 0
-            for f in tqdm(range(n_files)):
-                file = file_paths[f]
-                _, filename = os.path.split(file)
-                filename, ext = os.path.splitext(filename)
-                patient_name = filename + ext
+            for f in tqdm(range(len(file_paths))):
+                patient_id = sequence = modality = None
                 try:
-                    if file.name.endswith('nii.gz') or file.name.endswith('nii'):
-                        medscan = self.__process_one_nifti(file, path_data)
+                    medscan = self.__load_medscan_for_pre_radiomics_checks(
+                        file_paths[f], path_data, use_dicoms, use_niftis
+                    )
+                    if medscan is None:
+                        continue
+
+                    # Compute SUV map if it's a PET scan without SUV values
+                    if compute_suv_map:
+                        suv_converter = PETSUVConverter(medscan.dicomH)
+                        medscan.data.volume.array = suv_converter.compute(np.double(medscan.data.volume.array))
+
+                    patient_id, sequence, modality = medscan.patientID, medscan.series_description, medscan.type
+
+                    if roi_table is not None:
+                        # Extract ROI values according to csv file
+                        name_roi = roi_table[(roi_table['PatientID'] == patient_id) &
+                                             (roi_table['ImagingScanName'] == sequence) &
+                                             (roi_table['ImagingModality'] == modality)
+                                            ]['ROIname'].values
+                        if len(name_roi) == 0:
+                            print(f"No ROI found for patient {patient_id} with sequence {sequence} and modality {modality} in the csv file, skipping this scan.")
+                            continue
+
+                        name_roi = name_roi[0]
                     else:
-                        with open(file, 'rb') as file:
-                            medscan = pickle.load(file)
-                        if re.search('PTscan', wildcard) and medscan.format != 'nifti':
-                            suv_converter = PETSUVConverter(medscan.dicomH)
-                            medscan.data.volume.array = suv_converter.compute(np.double(medscan.data.volume.array))
-                    patient_names = pd.Index(patient_names)
-                    ind_roi = patient_names.get_loc(patient_name)
-                    name_roi = roi_table.loc[ind_roi][3]
+                        # No csv file, the union of all the ROIs of the scan is used
+                        name_roi = None
+
                     vol_obj_init, roi_obj_init = get_roi_from_indexes(medscan, name_roi, 'box')
                     temp = vol_obj_init.data[roi_obj_init.data == 1]
                     temp_val.append(len(temp))
@@ -1033,18 +1287,24 @@ class DataManager(object):
                     del vol_obj_init
                     del roi_obj_init
                 except Exception as e:
-                    print(f"Problem with patient {patient_name}, error: {e}")
+                    print(f"Problem with patient {patient_id}, error: {e}")
             
+            if not len(roi_data["data"]):
+                print(f"No ROI data could be extracted for the wildcard '{wildcard}', "
+                      "skipping this window check.")
+                continue
+
             roi_data["data"] = np.concatenate(roi_data["data"])
             roi_data["mean"] = np.mean(roi_data["data"][~np.isnan(roi_data["data"])])
             roi_data["median"] = np.median(roi_data["data"][~np.isnan(roi_data["data"])])
             roi_data["std"] = np.std(roi_data["data"][~np.isnan(roi_data["data"])])
             roi_data["min"] = np.min(roi_data["data"][~np.isnan(roi_data["data"])])
             roi_data["max"] = np.max(roi_data["data"][~np.isnan(roi_data["data"])])
-            roi_data[f"p{min_percentile}"] = np.percentile(roi_data["data"][~np.isnan(roi_data["data"])], 
-                                                        min_percentile)
-            roi_data[f"p{max_percentile}"] = np.percentile(roi_data["data"][~np.isnan(roi_data["data"])], 
-                                                        max_percentile)
+            # np.percentile expects [0, 100] while percentiles are given in [0, 1]
+            roi_data[f"p{min_percentile}"] = np.percentile(roi_data["data"][~np.isnan(roi_data["data"])],
+                                                        min_percentile * 100)
+            roi_data[f"p{max_percentile}"] = np.percentile(roi_data["data"][~np.isnan(roi_data["data"])],
+                                                        max_percentile * 100)
             
             # Set bin width if not provided
             if bin_width != 0:
@@ -1064,45 +1324,101 @@ class DataManager(object):
             if not hist_range:
                 hist_range = (roi_data["min"], roi_data["max"])
 
-           # re-segment data according to histogram range
+            # re-segment data according to histogram range
             roi_data["data"] = roi_data["data"][(roi_data["data"] > hist_range[0]) & (roi_data["data"] < hist_range[1])]
             df_data = pd.DataFrame(roi_data["data"], columns=['data'])
             del roi_data["data"]  # no interest in keeping data (we only need statistics)
 
-            # Plot histogram
-            ax = df_data.hist(column='data', bins=nb_bins, range=(hist_range[0], hist_range[1]), edgecolor='black')
-            min_quant, max_quant= df_data.quantile(min_percentile), df_data.quantile(max_percentile)
-            for x in ax[0]:
-                x.axvline(min_quant.data, linestyle=':', color='r', label=f"{min_percentile*100}% Percentile: {float(min_quant):.3f}")
-                x.axvline(max_quant.data, linestyle=':', color='g', label=f"{max_percentile*100}% Percentile: {float(max_quant):.3f}")
-                x.grid(False)
-                x.xaxis.set_ticks(np.arange(hist_range[0], hist_range[1], bin_width, dtype=int))
-                x.set_xticklabels(x.get_xticks(), rotation=45)
-                x.xaxis.set_tick_params(pad=15)
-                plt.title(f"Intensity range checks for {wildcard}, bw={bin_width}")
-                plt.legend()
-                # Save the plot
-                if save:
-                    plt.savefig(self.paths._path_save_checks / ('Intensity_range_check_' + f'bw_{bin_width}.png'))
+            # Plot: intensity range histogram 
+            min_quant, max_quant = (
+                df_data.quantile(min_percentile),
+                df_data.quantile(max_percentile)
+            )
+
+            fig, ax = plt.subplots(1, 1, figsize=(14, 5))
+            ax.hist(
+                df_data['data'].dropna(), bins=nb_bins,
+                range=(hist_range[0], hist_range[1]),
+                color=_HIST_COLOR, alpha=0.80, edgecolor='white', linewidth=0.6
+            )
+            ax.axvline(
+                min_quant.data, linestyle='--', color=_PMIN_COLOR, linewidth=1.8,
+                label=f"p{int(min_percentile * 100)}: {float(min_quant):.3f}"
+            )
+            ax.axvline(
+                max_quant.data, linestyle='--', color=_PMAX_COLOR, linewidth=1.8,
+                label=f"p{int(max_percentile * 100)}: {float(max_quant):.3f}"
+            )
+            ax.set_xlabel("Intensity Values", fontsize=12)
+            ax.set_ylabel("Frequency", fontsize=12)
+            ax.set_title(
+                f"Intensity Range Distribution — {wildcard}  (bin width = {bin_width})",
+                fontsize=13, fontweight='bold', pad=10
+            )
+            _max_x_ticks = 12
+            if nb_bins <= _max_x_ticks:
+                tick_positions = np.arange(
+                    hist_range[0], hist_range[1] + bin_width / 2, bin_width
+                )
+                ax.set_xticks(tick_positions)
+                ax.set_xticklabels(
+                    [f"{t:g}" for t in tick_positions],
+                    rotation=45, ha='right', fontsize=10
+                )
+            else:
+                ax.xaxis.set_major_locator(MaxNLocator(nbins=_max_x_ticks, min_n_ticks=4))
+                x_formatter = ScalarFormatter(useOffset=False)
+                x_formatter.set_scientific(False)
+                ax.xaxis.set_major_formatter(x_formatter)
+                plt.setp(ax.get_xticklabels(), rotation=45, ha='right', fontsize=10)
+            ax.xaxis.set_tick_params(pad=5)
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            ax.yaxis.grid(True, linestyle='--', alpha=0.4, color='grey')
+            ax.set_axisbelow(True)
+            ax.legend(frameon=False, fontsize=11)
+            fig.tight_layout()
+            if save:
+                if not self.paths._path_save_checks:
+                    print("Warning: save is set to True but the path to save checks is not defined, the figure will not be saved")
                 else:
-                    plt.show()
+                    fig.savefig(
+                        self.paths._path_save_checks / f'Intensity_range_check_bw_{bin_width}.png',
+                        dpi=150, bbox_inches='tight'
+                    )
+            else:
+                plt.show()
+            plt.close(fig)
             
             # save final checks
             if save:
-                wildcard = str(wildcard).replace('*', '').replace('.npy', '.json')
-                save_json(self.paths._path_save_checks / ('roi_data_' + wildcard), roi_data, cls=NumpyEncoder)
+                if not self.paths._path_save_checks:
+                    print("Warning: save is set to True but the path to save checks is not defined, the checks will not be saved")
+                else:
+                    wildcard = str(wildcard).replace('*', '')
+                    if '.npy' in wildcard:
+                        wildcard = wildcard.replace('.npy', '')
+                    elif not wildcard.endswith('.json'):
+                        wildcard += '.json'
+                    save_json(self.paths._path_save_checks / ('roi_data_' + wildcard), roi_data, cls=NumpyEncoder)
 
-    def pre_radiomics_checks(self,
-                            path_data: Union[str, Path] = None,
-                            wildcards_dimensions: List = [],
-                            wildcards_window: List = [],
-                            path_csv: Union[str, Path] = None,
-                            min_percentile: float = 0.05,
-                            max_percentile: float = 0.95,
-                            bin_width: int = 0,
-                            hist_range: list = [],
-                            nifti: bool = False,
-                            save: bool = False) -> None:
+    def pre_radiomics_checks(
+            self,
+            path_data: Union[str, Path] = None,
+            wildcards_dimensions: List = [],
+            wildcards_window: List = [],
+            path_csv: Union[str, Path] = None,
+            min_percentile: float = 0.05,
+            max_percentile: float = 0.95,
+            bin_width: int = 0,
+            hist_range: list = [],
+            compute_suv_map : bool = False,
+            dimensions_only: bool = False,
+            intensity_only: bool = False,
+            use_dicoms: bool = False,
+            use_niftis: bool = False,
+            save: bool = False
+        ) -> None:
         """Finds proper dimension and re-segmentation ranges options for radiomics analyses. 
 
         The resulting files from this method can then be analyzed and used to set up radiomics 
@@ -1118,19 +1434,31 @@ class DataManager(object):
                 that will be analyzed. You can learn more about wildcards in
                 `this link <https://www.linuxtechtips.com/2013/11/how-wildcards-work-in-linux-and-unix.html>`_.
             path_csv(Union[str, Path], optional): Path to a csv file containing a list of the scans that will be
-                analyzed (a CSV file for a single ROI type).
+                analyzed (a CSV file for a single ROI type). If not given, all the scans found in
+                ``path_data`` are analyzed, using the union of all the ROIs of each scan.
             min_percentile (float, optional): Minimum percentile to use for the histograms. Defaults to 0.05.
             max_percentile (float, optional): Maximum percentile to use for the histograms. Defaults to 0.95.
             bin_width(int, optional): Width of the bins for the histograms. If not provided, will use the 
                 default number of bins in the method 
                 :ref:`pandas.DataFrame.hist <https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.hist.html>`: 10 bins.
             hist_range(list, optional): Range of the histograms. If empty, will use the minimum and maximum values.
-            nifti (bool, optional): Set to True if the scans are nifti files. Defaults to False.
+            compute_suv_map (bool, optional): Whether to compute the SUV map for PET scans that do not have SUV values.
+            dimensions_only (bool, optional): If True, will only perform the dimensions checks. Defaults to False.
+            intensity_only (bool, optional): If True, will only perform the intensity checks. Defaults to False.
+            use_dicoms (bool, optional): Set to True to load DICOM files (``.dcm``). Cannot be used together with ``use_niftis``.
+            use_niftis (bool, optional): Set to True to load NIfTI files (``.nii`` / ``.nii.gz``). Cannot be used together with ``use_dicoms``.
+                If both ``use_dicoms`` and ``use_niftis`` are False, numpy files (``.npy``) are loaded by default.
             save (bool, optional): If True, will save the results in a json file. Defaults to False.
 
         Returns:
             None
         """
+        if dimensions_only and intensity_only:
+            raise ValueError("dimensions_only and intensity_only cannot both be True. Please select one option.")
+
+        if use_dicoms and use_niftis:
+            raise ValueError("use_dicoms and use_niftis cannot both be True. Please select one file format.")
+
         # Initialization
         path_study = Path.cwd()
 
@@ -1153,13 +1481,13 @@ class DataManager(object):
             # Wildcards of groups of files to analyze for dimensions in path_data.
             # See for example: https://www.linuxtechtips.com/2013/11/how-wildcards-work-in-linux-and-unix.html
             # Keep the cell empty if no dimension checks are to be performed.
-            if not wildcards_dimensions:
+            if not intensity_only and not wildcards_dimensions:
                 wildcards_dimensions = []
                 for i in range(len(settings['wildcards_dimensions'])):
                     wildcards_dimensions.append(settings['wildcards_dimensions'][i])
 
             # ROI intensity window checks params
-            if not wildcards_window:
+            if not dimensions_only and not wildcards_window:
                 wildcards_window = []
                 for i in range(len(settings['wildcards_window'])):
                     wildcards_window.append(settings['wildcards_window'][i])
@@ -1187,34 +1515,40 @@ class DataManager(object):
         print('\n\n************************* PRE-RADIOMICS CHECKS *************************', end='')
 
         # 1. PRE-RADIOMICS CHECKS -- DIMENSIONS
-        start1 = time()
-        print('\n--> PRE-RADIOMICS CHECKS -- DIMENSIONS ... ', end='')
-        self.__pre_radiomics_checks_dimensions(
-                                        path_data, 
-                                        wildcards_dimensions, 
-                                        min_percentile, 
-                                        max_percentile,
-                                        save)
-        print('DONE', end='')
-        time1 = f"{time() - start1:.2f}"
-        print(f'\nElapsed time: {time1} sec', end='')
+        if not intensity_only:
+            start1 = time()
+            print('\n--> PRE-RADIOMICS CHECKS -- DIMENSIONS ... ', end='')
+            self.__pre_radiomics_checks_dimensions(
+                                            path_data, 
+                                            wildcards_dimensions, 
+                                            min_percentile, 
+                                            max_percentile,
+                                            use_dicoms,
+                                            use_niftis,
+                                            save)
+            print('DONE', end='')
+            time1 = f"{time() - start1:.2f}"
+            print(f'\nElapsed time: {time1} sec', end='')
 
         # 2. PRE-RADIOMICS CHECKS - WINDOW
-        start2 = time()
-        print('\n\n--> PRE-RADIOMICS CHECKS -- WINDOW ... \n', end='')
-        self.__pre_radiomics_checks_window(
-                                        path_data, 
-                                        wildcards_window, 
-                                        path_csv,
-                                        min_percentile, 
-                                        max_percentile,
-                                        bin_width,
-                                        hist_range,
-                                        nifti,
-                                        save)
-        print('DONE', end='')
-        time2 = f"{time() - start2:.2f}"
-        print(f'\nElapsed time: {time2} sec', end='')
+        if not dimensions_only:
+            start2 = time()
+            print('\n\n--> PRE-RADIOMICS CHECKS -- WINDOW ... \n', end='')
+            self.__pre_radiomics_checks_window(
+                                            path_data, 
+                                            wildcards_window, 
+                                            path_csv,
+                                            min_percentile, 
+                                            max_percentile,
+                                            bin_width,
+                                            hist_range,
+                                            compute_suv_map,
+                                            use_dicoms=use_dicoms,
+                                            use_niftis=use_niftis,
+                                            save=save)
+            print('DONE', end='')
+            time2 = f"{time() - start2:.2f}"
+            print(f'\nElapsed time: {time2} sec', end='')
 
         time_elapsed = f"{time() - start:.2f}"
         print(f'\n\n--> TOTAL TIME FOR PRE-RADIOMICS CHECKS: {time_elapsed} seconds')

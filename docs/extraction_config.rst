@@ -5,7 +5,7 @@ In ``MEDiml``, all the subpackages and modules need a specific configuration to 
 rely on one single JSON configuration file. This file contains parameters for each step of the workflow (processing, extraction...).
 For example, `IBSI <https://arxiv.org/abs/1612.07003>`__ tests require specific parameters for radiomics extraction for each test.
 You can check a full example of the file here: 
-`notebooks/ibsi/settings/ <https://github.com/MEDomicsLab/MEDiml/tree/main/notebooks/ibsi/settings>`__.
+`notebooks/ibsi/settings/ <https://github.com/MEDomicsLab/MEDiml-pkg/tree/main/notebooks/ibsi/settings>`__.
 This section will walk you through the details on how to set up and use the configuration file. It will be separated to four subdivision:
 
 - :ref:`Pre-checks<Pre-checks Parameters>`
@@ -38,10 +38,57 @@ e.g.
 
     {
         "$schema": "http://json-schema.org/draft-04/schema#",
+        "title": "categorize_features",
+        "description": "Optional. If true, a copy of each radiomics table (CSV and TXT files) is also saved for every feature
+            category, in the same folder as the main table: morphological (``morph``), intensity-based (``int``: local intensity,
+            statistics, intensity histogram, intensity-volume histogram and dose), texture (``text``: GLCM, GLRLM, GLSZM, GLDZM,
+            NGTDM and NGLDM) and ``unknown`` for the features matching no category. Set it to false to only save the main table.
+            Defaults to true when not given.",
+        "type": "bool"
+    }
+
+e.g.
+
+.. code-block:: JSON
+
+    {
+        "categorize_features" : true
+    }
+
+The category tag replaces the ``image`` space in the table name, or is appended to the filter space
+(set by ``name_save``) when a filter is used. For example, for a CT scan and a ``GTV`` ROI:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Main table
+      - Category tables
+    * - ``radiomics__CT(GTV)__image.csv``
+      - ``radiomics__CT(GTV)__morph.csv``, ``radiomics__CT(GTV)__int.csv``,
+        ``radiomics__CT(GTV)__text.csv``, ``radiomics__CT(GTV)__unknown.csv``
+    * - ``radiomics__CT(GTV)__Wavelet-db3-LLH.csv``
+
+Each CSV table comes with its TXT definitions file of the same name. A category table is only saved when it has
+at least one feature (the ``unknown`` table is usually not created).
+
+.. note::
+    The features are renumbered from ``radVar1`` in each category table, so ``radVar1`` of
+    ``radiomics__CT(GTV)__morph.csv`` is not the same feature as ``radVar1`` of ``radiomics__CT(GTV)__image.csv``.
+    Always use the TXT file matching the CSV table to find the full name of a feature. Since the category tables
+    keep the ``radiomics__<scan>(<roi>)__<space>`` naming, they can be used directly in the learning module by
+    adding the category tag to the ``imSpaces`` of the learning settings (e.g. ``["morph", "text"]`` or
+    ``["Wavelet_db3_LLH_morph"]``).
+
+.. jsonschema::
+
+    {
+        "$schema": "http://json-schema.org/draft-04/schema#",
         "title": "roi_type_labels",
-        "description": "A list of labels for the regions of interest (ROI) to use in the analysis. The labels must match the names 
-            of the corresponding CSV files. For example, if you have a csv file named ``roiNames_GTV.csv``, 
-            then the ``roi_type_labels`` msut be ``[\"GTV\"]``.",
+        "description": "Optional. A list of labels for the regions of interest (ROI) to use in the analysis. The labels must match the names
+            of the corresponding CSV files. For example, if you have a csv file named ``roiNames_GTV.csv``,
+            then the ``roi_type_labels`` msut be ``[\"GTV\"]``. Defaults to ``[\"ROI\"]`` when not given.
+            When no csv file is used, only the first label of the list is processed, since every label would
+            otherwise produce the exact same features.",
         "type": "List[str]"
     }
 
@@ -58,10 +105,11 @@ e.g.
     {
         "$schema": "http://json-schema.org/draft-04/schema#",
         "title": "roi_types",
-        "description": "A list of labels that describe the regions of interest, used to save the analysis results. The labels must accurately 
+        "description": "Optional. A list of labels that describe the regions of interest, used to save the analysis results. The labels must accurately
             reflect the regions analyzed. For instance, if you conduct an analysis of a single ROI in a  ``\"GTV\"`` area with
             two different ROIs (``\"Mass\"`` and ``\"Edema\"``), the label can be ``[\"GTVMassOnly\"]``. This name will be displayed in the
-            JSON results file.",
+            JSON results file. Defaults to ``[\"all\"]`` when not given, and must have the same number of entries
+            as ``roi_type_labels``.",
         "type": "List[str]"
     }
 
@@ -153,7 +201,9 @@ e.g.
     {
         "$schema": "http://json-schema.org/draft-04/schema#",
         "title": "path_csv",
-        "description": "Path to your dataset csv file (Read more about the :doc:`../csv_file`)",
+        "description": "Optional. Path to your dataset csv file (Read more about the :doc:`../csv_file`).
+            If not given, all the scans found in the given path are analyzed, using the union of all
+            the ROIs of each scan.",
         "type": "str"
     }
 
@@ -1237,6 +1287,7 @@ Here is an example of a complete settings dictionary:
                 "path_save_checks" : ""
             },
             "n_batch" : 16,
+            "categorize_features" : true,
             "roi_type_labels" : [
                 "Lesions"
             ],

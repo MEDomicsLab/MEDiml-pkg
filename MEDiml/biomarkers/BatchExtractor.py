@@ -16,6 +16,22 @@ import ray
 from tqdm import trange
 
 import MEDiml
+from MEDiml.utils.dicom_dataset import find_dicom_scan_dir, get_dicom_scan_dir
+from MEDiml.utils.parse_nifti_name import is_nifti_file, is_roi_file, parse_nifti_name
+from MEDiml.wrangling.DataManager import DataManager
+
+# Used to name the saved features when no roi type is defined in the parameters file.
+DEFAULT_ROI_TYPE = 'all'
+DEFAULT_ROI_TYPE_LABEL = 'ROI'
+
+# Feature families tags
+FEATURE_CATEGORIES = {
+    'morph': ('morph_3D',),
+    'int': ('locInt_3D', 'stats_3D', 'intHist_3D', 'intVolHist_3D', 'dose_3D'),
+    'text': ('glcm_3D', 'glrlm_3D', 'glszm_3D', 'gldzm_3D', 'ngtdm_3D', 'ngldm_3D'),
+}
+# Tag of the features matching none of the categories above.
+UNKNOWN_CATEGORY = 'unknown'
 
 
 class BatchExtractor(object):
@@ -24,88 +40,304 @@ class BatchExtractor(object):
     """
 
     def __init__(
-            self, 
+            self,
             path_read: Union[str, Path],
-            path_csv: Union[str, Path],
             path_params: Union[str, Path],
             path_save: Union[str, Path],
+            path_csv: Union[str, Path] = None,
+            pred_doses_csv: Union[str, Path] = None,
+            presc_dose_column: str = None,
             n_batch: int = 4,
+            use_niftis: bool = False,
+            use_dicoms: bool = False,
             skip_existing: bool = False
     ) -> None:
         """
-        constructor of the BatchExtractor class 
+        constructor of the BatchExtractor class
+
+        Note:
+            ``path_csv`` is optional. If it is not given, all the scans found in ``path_read``
+            are processed, using the union of all the ROIs of each scan.
         """
-        self._path_csv = Path(path_csv)
+
+        assert not (use_niftis and use_dicoms), "Please select either NIfTI files or DICOM files "
+        "for processing, not both."
+
+        if not Path(path_read).exists():
+            raise ValueError("The provided path for reading scan files does not exist. Please check the path and try again.")
+
+        # Catches the callers still using the previous argument order, where the ROI CSV
+        # file was the second positional argument.
+        if str(path_params).lower().endswith('.csv'):
+            raise ValueError(
+                'The "path_params" argument looks like a CSV file. The BatchExtractor arguments '
+                'order has changed, it is now (path_read, path_params, path_save, path_csv=None). '
+                'Please pass the ROI CSV file using the "path_csv" keyword argument.')
+
+        self._path_csv = Path(path_csv) if path_csv else None
         self._path_params = Path(path_params)
-        self._path_read = Path(path_read)
+        self._path_npy = Path(path_read) if path_read else None
+        self._path_dicoms = Path(path_read) if path_read else None
+        self._path_niftis = Path(path_read) if path_read else None
         self._path_save = Path(path_save)
+        self._pred_doses_csv = Path(pred_doses_csv) if pred_doses_csv else None
+        self.presc_dose_column = presc_dose_column
         self.roi_types = []
         self.roi_type_labels = []
         self.n_bacth = n_batch
+        self.use_niftis = use_niftis
+        self.use_dicoms = use_dicoms
         self.skip_existing = skip_existing
 
     def __load_and_process_params(self) -> Dict:
         """Load and process the computing & batch parameters from JSON file"""
         # Load json parameters
         im_params = MEDiml.utils.json_utils.load_json(self._path_params)
-        
+
+        # The roi types are only used to name the saved features, so they are optional.
+        roi_types = im_params.get('roi_types') or [DEFAULT_ROI_TYPE]
+        roi_type_labels = im_params.get('roi_type_labels') or [DEFAULT_ROI_TYPE_LABEL]
+
+        if len(roi_types) != len(roi_type_labels):
+            raise ValueError(
+                f'"roi_types" ({len(roi_types)} entries) and "roi_type_labels" '
+                f'({len(roi_type_labels)} entries) must have the same number of entries in the '
+                'parameters JSON file.')
+
+        for roi_type_label in roi_type_labels:
+            # Parentheses would break the naming of the saved features (see save_radiomics).
+            if '(' in roi_type_label or ')' in roi_type_label:
+                raise ValueError(
+                    f'The "roi_type_labels" entries must not contain parentheses: "{roi_type_label}".')
+
+        # Without a ROI CSV file every roi type would extract the exact same features, so
+        # only the first one is kept to avoid duplicating the work.
+        if self._path_csv is None and len(roi_types) > 1:
+            message = (
+                'No ROI CSV file was given and more than one roi type is defined in the parameters '
+                f'file. Only the first one ("{roi_types[0]}"/"{roi_type_labels[0]}") will be used.')
+            logging.warning(message)
+            print(f'\n WARNING: {message}')
+            roi_types = roi_types[:1]
+            roi_type_labels = roi_type_labels[:1]
+
         # Update class attributes
-        self.roi_types.extend(im_params['roi_types'])
-        self.roi_type_labels.extend(im_params['roi_type_labels'])
+        self.roi_types.extend(roi_types)
+        self.roi_type_labels.extend(roi_type_labels)
         self.n_bacth = im_params['n_batch'] if 'n_batch' in im_params else self.n_bacth
 
         return im_params
 
+    @staticmethod
+    def __peek_dicom_modality(scan_dir: Path) -> Union[str, None]:
+        """Reads the modality of a DICOM scan folder from the header of its first image file.
+
+        Args:
+            scan_dir(Path): Path to the folder holding the DICOM files of one scan.
+
+        Returns:
+            Union[str, None]: The modality of the scan (ex: 'CTscan'), None if it could
+            not be determined.
+        """
+        import pydicom
+
+        for file in sorted(scan_dir.rglob('*')):
+            if not file.is_file():
+                continue
+            try:
+                header = pydicom.dcmread(str(file), stop_before_pixels=True, force=True)
+            except Exception:
+                continue
+            modality = getattr(header, 'Modality', None)
+            # The radiotherapy files (RTSTRUCT, RTDOSE...) do not define the scan modality.
+            if modality and str(modality) in ['MR', 'PT', 'CT', 'ADC']:
+                return str(modality) + 'scan'
+
+        return None
+
+    def __discover_scans(self) -> Dict:
+        """Finds all the scans available in the read path, used when no ROI CSV file is given.
+
+        The scans are identified the same way they are in the ROI CSV file, so that the
+        batches can be created without any other change. The ROI names are left undefined,
+        which makes the extraction use the union of all the ROIs of each scan.
+
+        Returns:
+            Dict: Dict of the lists of patient IDs, imaging scan names, imaging modalities
+            and ROI names (all None) of every scan found.
+        """
+        scans = []
+        scans_found = set()
+
+        if self.use_niftis:
+            path_read = self._path_niftis
+            for file in sorted(path_read.rglob('*.nii*')):
+                if not is_nifti_file(file) or is_roi_file(file):
+                    # The ROI masks are associated to their scan when it gets loaded.
+                    continue
+                patient_id, sequence, _, modality = parse_nifti_name(file)
+                if not (patient_id and sequence and modality):
+                    continue
+                # The same scan is duplicated once per ROI, so it must be de-duplicated.
+                scan = (patient_id, sequence, modality)
+                if scan not in scans_found:
+                    scans_found.add(scan)
+                    scans += [scan]
+
+        elif self.use_dicoms:
+            path_read = self._path_dicoms
+            # The DICOM datasets are organized as "path_read/PatientID/Modality/ImagingScanName"
+            # (or "path_read/PatientID/Modality" if the sequence is unknown).
+            for scan_dir in sorted({get_dicom_scan_dir(f) for f in path_read.rglob('*.dcm')}):
+                relative_parts = scan_dir.relative_to(path_read).parts
+                if len(relative_parts) < 2:
+                    continue
+                modality = self.__peek_dicom_modality(scan_dir)
+                if modality is None:
+                    logging.warning(f"Could not determine the modality of {scan_dir}, skipping it.")
+                    continue
+                scan = (relative_parts[0], scan_dir.name, modality)
+                if scan not in scans_found:
+                    scans_found.add(scan)
+                    scans += [scan]
+
+        else:
+            path_read = self._path_npy
+            for file in sorted(path_read.rglob('*.npy')):
+                name = file.name[:-len('.npy')]
+                # Skip the radiomics tables created by a previous extraction.
+                if name.startswith('radiomics__') or any(
+                        part.startswith('features(') for part in file.parts):
+                    continue
+                if '__' not in name or '.' not in name:
+                    continue
+                # `rsplit` is used since an imaging scan name may itself contain a dot.
+                head, modality = name.rsplit('.', 1)
+                patient_id, _, sequence = head.partition('__')
+                if not (patient_id and sequence and modality):
+                    continue
+                scan = (patient_id, sequence, modality)
+                if scan not in scans_found:
+                    scans_found.add(scan)
+                    scans += [scan]
+
+        if not scans:
+            raise ValueError(
+                f'No scan was found in the given path: {path_read}. Please provide a ROI CSV file '
+                'using the "path_csv" argument, or check the read path and the selected format '
+                '("use_niftis"/"use_dicoms").')
+
+        print(f'\n --> No ROI CSV file given: found {len(scans)} scan(s), the union of all the '
+              'ROIs of each scan will be used.')
+
+        return {
+            'patient_ids': [scan[0] for scan in scans],
+            'sequences': [scan[1] for scan in scans],
+            'modalities': [scan[2] for scan in scans],
+            'roi_names': [None] * len(scans),
+        }
+
     @ray.remote
     def __compute_radiomics_one_patient(
             self,
-            name_patient: str,
+            patient_id: str,
+            modality: str,
+            sequence: str,
             roi_name: str,
             im_params: Dict,
             roi_type: str,
             roi_type_label: str,
-            log_file: Union[Path, str]
+            log_file: Union[Path, str],
+            presc_dose: float = None
         ) -> str:
         """
         Computes all radiomics features (Texture & Non-texture) for one patient/scan
 
         Args:
-            name_patient(str): scan or patient full name. It has to respect the MEDiml naming convention:
-                PatientID__ImagingScanName.ImagingModality.npy
-            roi_name(str): name of the ROI that will  be used in computation.
+            patient_id(str): ID of the patient.
+            modality(str): Modality of the scan (CT, MR, PT).
+            sequence(str): Name of the scan sequence (e.g., T1, T2, FLAIR for MR scans).
+            roi_name(str): name of the ROI that will  be used in computation. If None, the
+                union of all the ROIs of the scan is used.
             im_params(Dict): Dict of parameters/settings that will be used in the processing and computation.
             roi_type(str): Type of ROI used in the processing and computation (for identification purposes)
             roi_type_label(str): Label of the ROI used, to make it identifiable from other ROIs.
             log_file(Union[Path, str]): Path to the logging file.
+            presc_dose(float, optional): Prescription dose in Gy, required for dose features extraction if enabled. Defaults to None.
 
         Returns:
             Union[Path, str]: Path to the updated logging file.
         """
         # Setting up logging settings
-        logging.basicConfig(filename=log_file, level=logging.DEBUG, force=True)
+        logging.basicConfig(filename=log_file, level=logging.INFO, force=True)
 
         # Check if features are already computed for the current scan
         if self.skip_existing:
-            modality = name_patient.split('.')[1]
-            name_save = name_patient.split('.')[0] + f'({roi_type_label})' + f'.{modality}.json'
+            name_save = patient_id + '__' + sequence + f'({roi_type_label})' + f'.{modality}.json'
             if Path(self._path_save / f'features({roi_type})' / name_save).exists():
-                logging.info("Skipping existing features for scan: {name_patient}")
+                logging.info("Skipping existing features for scan: {patient_id}")
                 return log_file
 
         # start timer
         t_start = time()
 
         # Initialization
-        message = f"\n***************** COMPUTING FEATURES: {name_patient} *****************"
+        message = f"\n***************** COMPUTING FEATURES: {patient_id} *****************"
         logging.info(message)
 
-        # Load MEDscan instance
-        try:
-            with open(self._path_read / name_patient, 'rb') as f: medscan = pickle.load(f)
-            medscan = MEDiml.MEDscan(medscan)
-        except Exception as e:
-            print(f"\n ERROR LOADING PATIENT {name_patient}:\n {e}")
-            return None
+        # Load nifti files if the option is selected.
+        medscan = None
+        # Name used to save the features. It must hold exactly one "(...)" group, since
+        # save_radiomics() replaces its content with the roi type label.
+        name_patient = f'{patient_id}__{sequence}({roi_type_label})'
+
+        if self.use_niftis:
+            try:
+                # The ROI part of the file name is not used to find the scan, so that all
+                # the ROIs of the scan can be loaded (and not only the requested ones).
+                search_name = f'{patient_id}__{sequence}'
+                all_niftis = [file for file in self._path_niftis.rglob(f"{search_name}*.nii*")]
+                if len(all_niftis) == 0:
+                    logging.error(f"No NIfTI files found for {search_name} in {self._path_niftis}.")
+                    return log_file
+                scan_paths = sorted(file for file in all_niftis
+                                    if file.name.endswith(f".{modality}.nii.gz") or file.name.endswith(f".{modality}.nii"))
+                if len(scan_paths) == 0:
+                    logging.error(f"No {modality} NIfTI image found for {search_name} in {self._path_niftis}.")
+                    return log_file
+                # The scan is duplicated once per ROI, all the copies hold the same image.
+                nifti_scan_path = scan_paths[0]
+                dm = DataManager()
+                # The read path (and not a single mask file) is given so that every ROI of
+                # the scan gets associated to it.
+                medscan = dm.process_one_nifti(nifti_scan_path, self._path_niftis)
+            except Exception as e:
+                logging.error(f"Error loading NIfTI files for {patient_id}: {e}")
+                return log_file
+        elif self.use_dicoms:
+            try:
+                dicom_scan_path = find_dicom_scan_dir(self._path_dicoms, patient_id, sequence)
+                if dicom_scan_path is not None:
+                    dm = DataManager(path_to_dicoms=dicom_scan_path)
+                    medscan = dm.process_one_dicom()
+                else:
+                    logging.error(f"DICOM directory not found for {name_patient} in {self._path_dicoms}. "
+                                  f"Expected path: {self._path_dicoms / patient_id}/<Modality>/{sequence}")
+                    return log_file
+            except Exception as e:
+                logging.error(f"Error loading DICOM files for {patient_id}: {e}")
+                return log_file
+        else:
+            # Load MEDscan instance
+            try:
+                name_patient = patient_id + '__' + sequence + '.' + modality + '.npy'
+                with open(self._path_npy / name_patient, 'rb') as f: medscan = pickle.load(f)
+                medscan = MEDiml.MEDscan(medscan)
+            except Exception as e:
+                print(f"\n ERROR LOADING PATIENT {name_patient}:\n {e}")
+                return log_file
+
+        if medscan is None: return log_file
 
         # Init processing & computation parameters
         medscan.init_params(im_params)
@@ -119,8 +351,9 @@ class BatchExtractor(object):
                 name_roi=roi_name,
                 box_string=medscan.params.process.box_string
             )
-        except:
-            # if for the current scan ROI is not found, computation is aborted. 
+        except Exception as e:
+            # if for the current scan ROI is not found, computation is aborted.
+            logging.error(f"ROI extraction failed for {patient_id} ({sequence}): {e}")
             return log_file
 
         start = time()
@@ -199,7 +432,7 @@ class BatchExtractor(object):
 
         # check if ROI is empty
         if math.isnan(np.nanmax(vol_int_re)) and math.isnan(np.nanmin(vol_int_re)):
-            logging.error(f'PROBLEM WITH INTENSITY MASK. ROI {roi_name} IS EMPTY.')
+            logging.error(f'PROBLEM WITH INTENSITY MASK. ROI {roi_name or "(union of all ROIs)"} IS EMPTY.')
             return log_file
         
         # Computation of non-texture features
@@ -248,6 +481,22 @@ class BatchExtractor(object):
         except Exception as e:
             logging.error(f'PROBLEM WITH COMPUTATION OF STATISTICAL FEATURES {e}')
             stats = None
+
+        # Dose features extraction
+        dose_features = None
+        try:
+            if medscan.params.radiomics.extract['Dose']:
+                dose_features = MEDiml.biomarkers.dosiomics.extract_all(
+                    volume=vol_obj.data,
+                    vox_dim=medscan.params.process.scale_non_text,
+                    mask=roi_obj_int.data,
+                    presc_dose=presc_dose,
+                    mask_extension=medscan.params.process.dose_mask_extension,
+                    vx_thresholds=medscan.params.process.dose_vx_thresholds
+                )
+        except Exception as e:
+            logging.error(f'PROBLEM WITH COMPUTATION OF DOSE FEATURES {e}')
+            dose_features = None
 
         # Intensity histogram equalization of the imaging volume
         vol_quant_re, _ = MEDiml.processing.discretize(
@@ -472,6 +721,7 @@ class BatchExtractor(object):
                                 loc_int_features=local_intensity, 
                                 stats_features=stats, 
                                 int_hist_features=int_hist,
+                                dose_features=dose_features,
                                 glcm_features=glcm, 
                                 glrlm_features=glrlm, 
                                 glszm_features=glszm, 
@@ -489,11 +739,74 @@ class BatchExtractor(object):
                         path_save=self._path_save,
                         roi_type=roi_type,
                         roi_type_label=roi_type_label,
+                        used_niftis=self.use_niftis,
+                        used_dicoms=self.use_dicoms,
+                        modality=modality or medscan.type
                     )
         
         logging.info(f"TOTAL TIME:{time() - t_start} seconds\n\n")
 
         return log_file
+
+    @staticmethod
+    def __save_categorized_tables(radiomics_table_dict: Dict, save_path: Path) -> Dict:
+        """
+        Splits a radiomics table into one table per feature category (see ``FEATURE_CATEGORIES``),
+        plus one for the features matching no category, and saves each of them as CSV and TXT
+        files next to the main table.
+
+        The category tag is appended to the image space of the table name, the ``image`` space being
+        replaced by it (e.g. radiomics__CT(GTV)__image -> radiomics__CT(GTV)__morph and
+        radiomics__CT(GTV)__Wavelet-db3-LLH -> radiomics__CT(GTV)__Wavelet-db3-LLH), so the
+        tables keep the ``radiomics__<scan>(<roi>)__<space>`` naming used by the learning module.
+        The features are renumbered from radVar1 in each category table.
+
+        Args:
+            radiomics_table_dict(Dict): Radiomics table, as created by ``MEDiml.utils.create_radiomics_table``.
+            save_path(Path): Path of the main radiomics table.
+
+        Returns:
+            Dict: The number of features of each category saved.
+        """
+        table = radiomics_table_dict['Table']
+        definitions = dict(
+            entry.split(':', 1)
+            for entry in radiomics_table_dict['Properties']['UserData'].split('||') if ':' in entry
+        )
+
+        # Columns of each category, in their original order
+        columns = {category: [] for category in [*FEATURE_CATEGORIES, UNKNOWN_CATEGORY]}
+        for var in table.columns:
+            # The full feature name starts with its family (e.g. morph_3D__Fmorph_vol__scale2)
+            family = definitions.get(var, '').split('__')[0]
+            category = next(
+                (c for c, families in FEATURE_CATEGORIES.items() if family.startswith(families)),
+                UNKNOWN_CATEGORY
+            )
+            columns[category].append(var)
+
+        head, _, im_space = save_path.stem.rpartition(')__')
+        n_features = {}
+        for category, variables in columns.items():
+            if not variables:
+                continue
+            new_names = ['radVar' + str(i + 1) for i in range(len(variables))]
+            space = category if im_space == 'image' else im_space + '_' + category
+            name_table = head + ')__' + space
+
+            # Same format as MEDiml.utils.write_radiomics_csv
+            table_category = table[variables].set_axis(new_names, axis=1).fillna(value='NaN').sort_index()
+            table_category.to_csv(save_path.parent / (name_table + '.csv'),
+                                  sep=',',
+                                  encoding='utf-8',
+                                  index=True,
+                                  index_label=radiomics_table_dict['Properties']['DimensionNames'][0])
+            with open(save_path.parent / (name_table + '.txt'), 'w') as fid:
+                fid.write('||' + ''.join(
+                    new + ':' + definitions.get(old, old) + '||' for new, old in zip(new_names, variables)))
+            n_features[category] = len(variables)
+
+        return n_features
 
     @ray.remote
     def __compute_radiomics_tables(
@@ -503,7 +816,9 @@ class BatchExtractor(object):
             im_params: Dict
         ) -> None:
         """
-        Creates radiomic tables off of the saved dicts with the computed features and save it as CSV files
+        Creates radiomic tables off of the saved dicts with the computed features and save it as CSV files.
+        Unless ``categorize_features`` is set to false in the parameters file, a copy of each table is also
+        saved for every feature category (morph, int, text and unknown), see ``__save_categorized_tables``.
 
         Args:
             table_tags(List): Lists of information about scans, roi type and imaging space (or filter space)
@@ -513,6 +828,8 @@ class BatchExtractor(object):
         Returns:
             None.
         """
+        logging.basicConfig(filename=log_file, level=logging.INFO, force=True)
+
         n_tables = len(table_tags)
 
         for t in range(0, n_tables):
@@ -570,7 +887,12 @@ class BatchExtractor(object):
             # Create CSV table and Definitions
             MEDiml.utils.write_radiomics_csv(save_path)
 
-            logging.info(f"DONE\n {time() - start}\n")
+            # Create one CSV table and Definitions per feature category (morph, int, text, unknown)
+            if im_params.get('categorize_features', True):
+                n_features = self.__save_categorized_tables(radiomics_table_dict, save_path)
+                logging.info(f"Features per category: {n_features}")
+
+            logging.info(f"DONE\nTime taken: {time() - start} seconds\n")
 
         return log_file
     
@@ -591,70 +913,88 @@ class BatchExtractor(object):
             roi_type_label = self.roi_type_labels[r]
             print(f'\n --> Computing features for the "{roi_type_label}" roi type ...', end = '')
 
-            # READING CSV EXPERIMENT TABLE
-            tabel_roi = pd.read_csv(self._path_csv / ('roiNames_' + roi_type_label + '.csv'))
+            if self._path_csv is not None:
+                # Check if the CSV file exists
+                if not self._path_csv.exists():
+                    raise FileNotFoundError(f'ROIs CSV file not found at path: {self._path_csv}. Please check the path and try again.')
 
-            # Check if all the requires columns are present
-            for col in ['PatientID', 'ImagingScanName', 'ImagingModality', 'ROIname']:
-                if col not in list(tabel_roi.columns):
-                    raise ValueError(f'Missing column "{col}" in the ROI CSV file for roi type "{roi_type_label}". \
-                        Please check that the CSV file contains all the required columns: "PatientID", "ImagingScanName", " \
-                        "ImagingModality" and "ROIname".')
+                # READING CSV EXPERIMENT TABLE
+                tabel_roi = pd.read_csv(self._path_csv)
 
-            tabel_roi['under'] = '_'
-            tabel_roi['dot'] = '.'
-            tabel_roi['npy'] = '.npy'
-            name_patients = (pd.Series(
-                tabel_roi[['PatientID', 'under', 'under',
-                        'ImagingScanName',
-                        'dot',
-                        'ImagingModality',
-                        'npy']].fillna('').values.tolist()).str.join('')).tolist()
-            tabel_roi = tabel_roi.drop(columns=['under', 'under', 'dot', 'npy'])
-            roi_names = tabel_roi.ROIname.tolist()
+                # Check if all the requires columns are present
+                for col in ['PatientID', 'ImagingScanName', 'ImagingModality', 'ROIname']:
+                    if col not in list(tabel_roi.columns):
+                        raise ValueError(f'Missing column "{col}" in the ROI CSV file for roi type "{roi_type_label}". \
+                            Please check that the CSV file contains all the required columns: "PatientID", "ImagingScanName", " \
+                            "ImagingModality" and "ROIname".')
 
-            # INITIALIZATION
-            os.chdir(self._path_save)
-            name_bacth_log = 'batchLog_' + roi_type_label
-            p = Path.cwd().glob('*')
-            files = [x for x in p if x.is_dir()]
-            n_files = len(files)
-            exist_file = name_bacth_log in [x.name for x in files]
-            if exist_file and (n_files > 0):
-                for i in range(0, n_files):
-                    if (files[i].name == name_bacth_log):
-                        mod_timestamp = datetime.fromtimestamp(
-                            Path(files[i]).stat().st_mtime)
-                        date = mod_timestamp.strftime("%d-%b-%Y_%HH%MM%SS")
-                        new_name = name_bacth_log+'_'+date
-                        if sys.platform == 'win32':
-                            os.system('move ' + name_bacth_log + ' ' + new_name)
-                        else:
-                            os.system('mv ' + name_bacth_log + ' ' + new_name)
+                # Filter out patients not present in the read path
+                if self.use_niftis:
+                    all_files = list(self._path_niftis.rglob('*.nii*'))
+                    condition = lambda x: any(f"{x['PatientID']}__{x['ImagingScanName']}" in file.name for file in all_files)
+                elif self.use_dicoms:
+                    condition = lambda x: find_dicom_scan_dir(
+                        self._path_dicoms, str(x['PatientID']), str(x['ImagingScanName'])) is not None
+                else:
+                    all_files = list(self._path_npy.rglob('*.npy'))
+                    condition = lambda x: any(f"{x['PatientID']}__{x['ImagingScanName']}" in file.name for file in all_files)
+                tabel_roi = tabel_roi[tabel_roi.apply(condition, axis=1)]
 
-            os.makedirs(name_bacth_log, 0o777, True)
-            path_batch = Path.cwd() / name_bacth_log
+                # Check if the table is not empty
+                if tabel_roi.empty:
+                    raise ValueError(f'No valid scan files found for roi type "{roi_type_label}".')
+
+                patient_ids = tabel_roi['PatientID'].tolist()
+                modalities = tabel_roi['ImagingModality'].tolist()
+                sequences = tabel_roi['ImagingScanName'].tolist()
+                roi_names = tabel_roi['ROIname'].tolist()
+            else:
+                # No CSV file given, all the scans found in the read path are processed
+                # using the union of all the ROIs of each scan.
+                discovered_scans = self.__discover_scans()
+                patient_ids = discovered_scans['patient_ids']
+                modalities = discovered_scans['modalities']
+                sequences = discovered_scans['sequences']
+                roi_names = discovered_scans['roi_names']
+
+            # Read dose information if dose features extraction is enabled
+            presc_doses = None
+            if self._pred_doses_csv and self._pred_doses_csv.exists():
+                presc_doses = pd.read_csv(self._pred_doses_csv)
+                if self.presc_dose_column and self.presc_dose_column in presc_doses.columns:
+                    presc_doses = presc_doses[presc_doses['PatientID'].isin(patient_ids)]
+                    presc_doses = dict(zip(presc_doses['PatientID'], presc_doses[self.presc_dose_column]))
+                    presc_doses = {p: presc_doses.get(p, None) for p in patient_ids}
+            else:
+                logging.warning('Dose features extraction is enabled but "PrescriptionDose" column is missing'
+                ' in the CSV file. Dose features will be skipped.')
+
+            # Initialization
+            if not self._path_save.exists():
+                os.makedirs(self._path_save, 0o777, True)
+            current_date = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            log_file_path = self._path_save / ('batchLog_' + roi_type_label + '_' + current_date + '.log')
 
             # PRODUCE BATCH COMPUTATIONS
-            n_patients = len(name_patients)
+            n_patients = len(patient_ids)
             n_batch = self.n_bacth
             if n_batch is None or n_batch < 0:
                 n_batch = 1
             elif n_patients < n_batch:
                 n_batch = n_patients
 
-            # Produce a list log_file path.
-            log_files = [path_batch / ('log_file_' + str(i) + '.log') for i in range(n_batch)]
-
             # Distribute the first tasks to all workers
             ids = [self.__compute_radiomics_one_patient.remote(
                         self,
-                        name_patient=name_patients[i],
+                        patient_id=patient_ids[i],
+                        modality=modalities[i],
+                        sequence=sequences[i],
                         roi_name=roi_names[i], 
                         im_params=im_params,
                         roi_type=roi_type,
                         roi_type_label=roi_type_label,
-                        log_file=log_files[i])
+                        log_file=log_file_path,
+                        presc_dose=presc_doses[patient_ids[i]] if presc_doses is not None else None)
             for i in range(n_batch)]
 
             # Distribute the remaining tasks
@@ -662,17 +1002,25 @@ class BatchExtractor(object):
             for _ in trange(n_patients):
                 ready, not_ready = ray.wait(ids, num_returns=1)
                 ids = not_ready
-                log_file = ray.get(ready)[0]
+                for ref in ready:
+                    try:
+                        _ = ray.get(ref)
+                    except ray.exceptions.RayTaskError as e:
+                        raise ValueError(f"Extraction task failed with error: {e.cause}")
+
                 if nb_job_left > 0:
                     idx = n_patients - nb_job_left
                     ids.extend([self.__compute_radiomics_one_patient.remote(
                                     self,
-                                    name_patients[idx],
+                                    patient_ids[idx],
+                                    modalities[idx],
+                                    sequences[idx],
                                     roi_names[idx], 
                                     im_params,
                                     roi_type,
                                     roi_type_label,
-                                    log_file)
+                                    log_file_path,
+                                    presc_dose=presc_doses[patient_ids[idx]] if presc_doses is not None else None)
                                 ])
                     nb_job_left -= 1
 
@@ -724,27 +1072,11 @@ class BatchExtractor(object):
                     im_space = im_spaces[i]
                     table_tags = table_tags + [[scan, label, self.roi_types[r], im_space, modality]]
 
-        # INITIALIZATION
-        os.chdir(self._path_save)
-        name_batch_log = 'batchLog_tables'
-        p = Path.cwd().glob('*')
-        files = [x for x in p if x.is_dir()]
-        n_files = len(files)
-        exist_file = name_batch_log in [x.name for x in files]
-        if exist_file and (n_files > 0):
-            for i in range(0, n_files):
-                if files[i].name == name_batch_log:
-                    mod_timestamp = datetime.fromtimestamp(
-                        Path(files[i]).stat().st_mtime)
-                    date = mod_timestamp.strftime("%d-%b-%Y_%H:%M:%S")
-                    new_name = name_batch_log+'_'+date
-                    if sys.platform == 'win32':
-                        os.system('move ' + name_batch_log + ' ' + new_name)
-                    else:
-                        os.system('mv ' + name_batch_log + ' ' + new_name)
-
-        os.makedirs(name_batch_log, 0o777, True)
-        path_batch = Path.cwd()
+        # Initialization
+        if not self._path_save.exists():
+            os.makedirs(self._path_save, 0o777, True)
+        current_date = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        log_file_path = self._path_save / ('batchLog_tables_' + current_date + '.log')
 
         # PRODUCE BATCH COMPUTATIONS
         n_tables = len(table_tags)
@@ -754,14 +1086,11 @@ class BatchExtractor(object):
         elif n_tables < self.n_bacth:
             self.n_bacth = n_tables
 
-        # Produce a list log_file path.
-        log_files = [path_batch / ('log_file_' + str(i) + '.txt') for i in range(self.n_bacth)]
-
         # Distribute the first tasks to all workers
         ids = [self.__compute_radiomics_tables.remote(
                                 self, 
                                 [table_tags[i]], 
-                                log_files[i],
+                                log_file_path,
                                 im_params)
                 for i in range(self.n_bacth)]
 
@@ -772,7 +1101,11 @@ class BatchExtractor(object):
             ids = not_ready
 
             # We verify if error has occur during the process
-            log_file = ray.get(ready)[0]
+            for ref in ready:
+                try:
+                    _ = ray.get(ref)
+                except ray.exceptions.RayTaskError as e:
+                    raise ValueError(f"Extraction tables creation failed with error: {e.cause}")
 
             # Distribute the remaining tasks
             if nb_job_left > 0:
@@ -780,7 +1113,7 @@ class BatchExtractor(object):
                 ids.extend([self.__compute_radiomics_tables.remote(
                                 self,
                                 [table_tags[idx]], 
-                                log_file,
+                                log_file_path,
                                 im_params)])
                 nb_job_left -= 1
 
@@ -788,7 +1121,8 @@ class BatchExtractor(object):
 
     def compute_radiomics(self, create_tables: bool = True) -> None:
         """Compute all radiomic features for all scans in the CSV file (set in initialization) and organize it
-        in JSON and CSV files
+        in JSON and CSV files. If no CSV file was given, all the scans found in the read path are
+        processed, using the union of all the ROIs of each scan.
 
         Args:
             create_tables(bool) : True to create CSV tables for the extracted features and not save it in JSON only.

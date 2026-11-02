@@ -1,23 +1,30 @@
 from sklearn.base import BaseEstimator, ClassifierMixin
 
-from ..utils.rf_learner import RandomForestEstimator
-from ..utils.xgboost_learner import XGBoostEstimator
+from ..utils.pycaret_learner import PyCaretEstimator
 
 
 class Estimator(BaseEstimator, ClassifierMixin):
-    def __init__(self, algorithm: str, ml_config: dict):
+    def __init__(self, algorithm: str, ml_config: dict, log_file=None):
+        """
+        Args:
+            algorithm (str): PyCaret classification model ID, or 'best'.
+            ml_config (dict): Modeling options passed to the PyCaret estimator.
+            log_file (str or Path, optional): Log file of the current split/run, used to log
+                all training steps. Defaults to None (standard ``logging`` configuration).
+        """
         self.ml_config = ml_config
         self.algorithm = algorithm
+        self.log_file = log_file
         self.estimator_ = None
 
     def _initialize_estimator(self):
-        """Factory algorithm to select the right internal class."""
-        if self.algorithm == 'xgboost':
-            return XGBoostEstimator(**self.ml_config)
-        elif self.algorithm == 'rf':
-            return RandomForestEstimator(**self.ml_config)
-        else:
-            raise ValueError(f"Method {self.algorithm} not supported.")
+        """Factory algorithm to select the right internal class.
+
+        `algorithm` accepts any PyCaret classification model ID (e.g. 'xgboost', 'rf',
+        'lr', 'dt', 'lightgbm', ...) or 'best' to auto-select via PyCaret's compare_models().
+        Invalid model IDs are rejected by PyCaret itself.
+        """
+        return PyCaretEstimator(algorithm=self.algorithm, log_file=self.log_file, **self.ml_config)
 
     def fit(self, X, y):
         self.estimator_ = self._initialize_estimator()

@@ -48,7 +48,7 @@ DataManager
     You can also find this tutorial on the repository ``MEDiml/notebooks/tutorial/DataManager-Tutorial.ipynb``.
 
 .. |DataManager_image_badge| image:: https://colab.research.google.com/assets/colab-badge.png
-    :target: https://colab.research.google.com/github/MEDomicsLab/MEDiml/blob/main/notebooks/tutorial/DataManager-Tutorial.ipynb
+    :target: https://colab.research.google.com/github/MEDomicsLab/MEDiml-pkg/blob/main/notebooks/tutorial/DataManager-Tutorial.ipynb
 
 .. image:: /figures/DataManager-overview.png
     :width: 800
@@ -64,7 +64,7 @@ MEDscan Class
     You can also find this tutorial on the repository ``MEDiml/notebooks/tutorial/MEDiml-Tutorial.ipynb``.
 
 .. |MEDiml_image_badge| image:: https://colab.research.google.com/assets/colab-badge.png
-    :target: https://colab.research.google.com/github/MEDomicsLab/MEDiml/blob/main/notebooks/tutorial/MEDiml-Tutorial.ipynb
+    :target: https://colab.research.google.com/github/MEDomicsLab/MEDiml-pkg/blob/main/notebooks/tutorial/MEDiml-Tutorial.ipynb
 
 Single-scan demo
 ================
@@ -77,7 +77,7 @@ Single-scan demo
     You can also find it on the repository ``MEDiml/notebooks/demo/Glioma-Demo.ipynb``.
 
 .. |Glioma_demo_image_badge| image:: https://colab.research.google.com/assets/colab-badge.png
-    :target: https://colab.research.google.com/github/MEDomicsLab/MEDiml/blob/main/notebooks/demo/Glioma-Demo.ipynb
+    :target: https://colab.research.google.com/github/MEDomicsLab/MEDiml-pkg/blob/main/notebooks/demo/Glioma-Demo.ipynb
 
 BatchExtractor
 ==============
@@ -90,14 +90,14 @@ BatchExtractor
     
     This class creates batches of scans and performs full extraction of all radiomics family features, saving them in tables and JSON files. 
     To run a batch extraction, simply set the path to your dataset and the path to your dataset's :doc:`../csv_file` of regions of interest.
-    (check example `here <https://github.com/MEDomicsLab/MEDiml/blob/main/notebooks/tutorial/CSV/roiNames_GTV.csv>`__).
+    (check example `here <https://github.com/MEDomicsLab/MEDiml-pkg/blob/main/notebooks/tutorial/CSV/roiNames_GTV.csv>`__).
 
     Learn more in the interactive Colab notebook here: |BatchExtractor_image_badge|
     
     You can also find it on the repository ``MEDiml/notebooks/tutorial/BatchExtractor-Tutorial.ipynb``.
 
 .. |BatchExtractor_image_badge| image:: https://colab.research.google.com/assets/colab-badge.png
-    :target: https://colab.research.google.com/github/MEDomicsLab/MEDiml/blob/main/notebooks/tutorial/BatchExtractor-Tutorial.ipynb
+    :target: https://colab.research.google.com/github/MEDomicsLab/MEDiml-pkg/blob/main/notebooks/tutorial/BatchExtractor-Tutorial.ipynb
 
 Learning
 ========
@@ -121,7 +121,7 @@ Overview
     You can also find it on the repository ``MEDiml/notebooks/tutorial/Learning-Tutorial.ipynb``.
 
 .. |Learning_image_badge| image:: https://colab.research.google.com/assets/colab-badge.png
-    :target: https://colab.research.google.com/github/MEDomicsLab/MEDiml/blob/learning/notebooks/tutorial/Learning-Tutorial.ipynb
+    :target: https://colab.research.google.com/github/MEDomicsLab/MEDiml-pkg/blob/main/notebooks/tutorial/Learning-Tutorial.ipynb
 
 How to setup your experiment
 ----------------------------

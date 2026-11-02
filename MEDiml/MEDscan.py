@@ -13,6 +13,7 @@ from PIL import Image
 from .utils.image_volume_obj import image_volume_obj
 from .utils.imref import imref3d
 from .utils.json_utils import load_json
+from .utils.parse_nifti_name import is_nifti_file, is_roi_file, parse_nifti_name
 
 
 class MEDscan(object):
@@ -120,9 +121,12 @@ class MEDscan(object):
         self.params.process.algo = im_params['discretisation']['texture']['type'] if 'type' in im_params['discretisation']['texture'] else []
         self.params.process.gray_levels = im_params['discretisation']['texture']['val'] if 'val' in im_params['discretisation']['texture'] else [[]]
         self.params.process.im_type = self.type
+        self.params.process.dose_vx_thresholds = im_params['dose_vx_thresholds'] if 'dose_vx_thresholds' in im_params else None
+        self.params.process.dose_mask_extension = im_params['dose_mask_extension'] if 'dose_mask_extension' in im_params else None
 
         # Voxels dimension
         self.params.process.n_scale = len(self.params.process.scale_text)
+
         # Setting up discretisation params
         self.params.process.n_algo = len(self.params.process.algo)
         self.params.process.n_gl = len(self.params.process.gray_levels[0])
@@ -218,7 +222,7 @@ class MEDscan(object):
         # Features to extract
         features = [
             "Morph", "LocalIntensity", "Stats", "IntensityHistogram", "IntensityVolumeHistogram", 
-            "GLCM", "GLRLM", "GLSZM", "GLDZM", "NGTDM", "NGLDM"
+            "GLCM", "GLRLM", "GLSZM", "GLDZM", "NGTDM", "NGLDM", "Dose"
         ]
         if "extract" in im_params.keys():
             self.params.radiomics.extract = im_params['extract']
@@ -400,6 +404,11 @@ class MEDscan(object):
                 'intVolHist_3D': {self.params.radiomics.ivh_name: {}} 
             })
 
+            if self.params.radiomics.extract.get('Dose', False):
+                self.radiomics.image.update({
+                    'dose_3D': {self.params.radiomics.scale_name: {}}
+                })
+
         except Exception as e:
             message = f"\n PROBLEM WITH PRE-PROCESSING OF FEATURES IN init_ntf_calculation(): \n {e}"
             logging.error(message)
@@ -494,6 +503,10 @@ class MEDscan(object):
             setattr(self.params.radiomics, 'processing_name', processing_name)
         else:
             self.params.radiomics.processing_name = processing_name
+        
+        # Update features dict
+        for feat in list(self.radiomics.image['texture'].keys()):
+            self.radiomics.image['texture'][feat].update({processing_name: {}})
 
     def init_from_nifti(self, nifti_image_path: Path) -> None:
         """Initializes the MEDscan class using a NIfTI file.
@@ -521,6 +534,7 @@ class MEDscan(object):
                         self, int_vol_hist_features: Dict = {}, 
                         morph_features: Dict = {}, loc_int_features: Dict = {}, 
                         stats_features: Dict = {}, int_hist_features: Dict = {},
+                        dose_features: Dict = {},
                         glcm_features: Dict = {}, glrlm_features: Dict = {},
                         glszm_features: Dict = {}, gldzm_features: Dict = {}, 
                         ngtdm_features: Dict = {}, ngldm_features: Dict = {}) -> None:
@@ -568,6 +582,10 @@ class MEDscan(object):
             self.radiomics.image['stats_3D'][self.params.radiomics.scale_name] = stats_features
         if int_hist_features:
             self.radiomics.image['intHist_3D'][self.params.radiomics.ih_name] = int_hist_features
+        if dose_features:
+            if 'dose_3D' not in self.radiomics.image:
+                self.radiomics.image['dose_3D'] = {self.params.radiomics.scale_name: {}}
+            self.radiomics.image['dose_3D'][self.params.radiomics.scale_name] = dose_features
         
         # Texture Features
         if glcm_features:
@@ -586,9 +604,16 @@ class MEDscan(object):
             self.radiomics.image['texture']['ngldm_3D'][self.params.radiomics.processing_name] = ngldm_features
 
     def save_radiomics(
-                    self, scan_file_name: List, 
-                    path_save: Path, roi_type: str, 
-                    roi_type_label: str, patient_num: int = None) -> None:
+        self, 
+        scan_file_name: List, 
+        path_save: Path, 
+        roi_type: str, 
+        roi_type_label: str, 
+        patient_num: int = None,
+        used_niftis: bool = False,
+        used_dicoms: bool = False,
+        modality: str = None
+    ) -> None:
         """
         Saves extracted radiomics features in a JSON file.
 
@@ -598,7 +623,9 @@ class MEDscan(object):
             roi_type(str): Type of the ROI.
             roi_type_label(str): Label of the ROI type.
             patient_num(int): Index of scan.
-        
+            used_niftis(bool): Whether the radiomics extraction was directly performed on NIfTI files.
+            used_dicoms(bool): Whether the radiomics extraction was directly performed on DICOM files.
+            modality(str): Modality of the scan, required if `used_niftis` is True.
         Returns:
             None.
         """
@@ -619,20 +646,25 @@ class MEDscan(object):
                                 self.data.volume.spatialRef.PixelExtentInWorldZ
                                 ])
         self.radiomics.update_params(params)
-        if type(scan_file_name) is str:
-            index_dot = scan_file_name.find('.')
-            ext = scan_file_name.find('.npy')
-            name_save = scan_file_name[:index_dot] + \
-                        '(' + roi_type_label + ')' + \
-                        scan_file_name[index_dot : ext]
-        elif patient_num is not None:
-            index_dot = scan_file_name[patient_num].find('.')
-            ext = scan_file_name[patient_num].find('.npy')
-            name_save = scan_file_name[patient_num][:index_dot] + \
-                        '(' + roi_type_label + ')' + \
-                        scan_file_name[patient_num][index_dot : ext]
+        if used_niftis or used_dicoms:
+            index_op_parenthesis = scan_file_name.find('(')
+            index_cl_parenthesis = scan_file_name.find(')')
+            name_save = scan_file_name[:index_op_parenthesis+1] + roi_type_label + scan_file_name[index_cl_parenthesis:] + '.' + modality
         else:
-            raise ValueError("`patient_num` must be specified or `scan_file_name` must be str")
+            if type(scan_file_name) is str:
+                index_dot = scan_file_name.find('.')
+                ext = scan_file_name.find('.npy')
+                name_save = scan_file_name[:index_dot] + \
+                            '(' + roi_type_label + ')' + \
+                            scan_file_name[index_dot : ext]
+            elif patient_num is not None:
+                index_dot = scan_file_name[patient_num].find('.')
+                ext = scan_file_name[patient_num].find('.npy')
+                name_save = scan_file_name[patient_num][:index_dot] + \
+                            '(' + roi_type_label + ')' + \
+                            scan_file_name[patient_num][index_dot : ext]
+            else:
+                raise ValueError("`patient_num` must be specified or `scan_file_name` must be str")
 
         with open(path_save / f"{name_save}.json", "w") as fp:   
             dump(self.radiomics.to_json(), fp, indent=4, cls=NumpyEncoder)
@@ -676,6 +708,8 @@ class MEDscan(object):
                 self.roi_pv = kwargs['roi_pv'] if 'roi_pv' in kwargs else None
                 self.user_set_min_value = kwargs['user_set_min_value'] if 'user_set_min_value' in kwargs else None
                 self.vol_interp = kwargs['vol_interp'] if 'vol_interp' in kwargs else None
+                self.dose_vx_thresholds = kwargs['dose_vx_thresholds'] if 'dose_vx_thresholds' in kwargs else None
+                self.dose_mask_extension = kwargs['dose_mask_extension'] if 'dose_mask_extension' in kwargs else 0
 
             def init_from_json(self, path_to_json: Union[Path, str]) -> None:
                 """
@@ -708,7 +742,8 @@ class MEDscan(object):
                 self.roi_pv = __params['roi_pv'] if 'roi_pv' in __params else self.roi_pv
                 self.user_set_min_value = __params['user_set_min_value'] if 'user_set_min_value' in __params else self.user_set_min_value
                 self.vol_interp = __params['vol_interp'] if 'vol_interp' in __params else self.vol_interp
-
+                self.dose_vx_thresholds = __params['dose_vx_thresholds'] if 'dose_vx_thresholds' in __params else self.dose_vx_thresholds
+                self.dose_mask_extension = __params['dose_mask_extension'] if 'dose_mask_extension' in __params else self.dose_mask_extension
 
         class Filter:
             """Organizes all filtering parameters"""
@@ -1599,8 +1634,10 @@ class MEDscan(object):
                 """
                 self.indexes = indexes if indexes else {}
                 self.roi_names = roi_names if roi_names else {}
-                self.nameSet = roi_names if roi_names else {}
-                self.nameSetInfo = roi_names if roi_names else {}
+                # Copied (and not aliased) so that updating one of these dicts can
+                # never corrupt `roi_names`.
+                self.nameSet = dict(roi_names) if roi_names else {}
+                self.nameSetInfo = dict(roi_names) if roi_names else {}
 
             def get_indexes(self, key):
                 if not self.indexes or key is None:
@@ -1625,6 +1662,93 @@ class MEDscan(object):
                     return {}
                 else:
                     return self.nameSetInfo[str(key)]
+
+            @staticmethod
+            def _indexes_are_valid(indexes) -> bool:
+                """Checks that the given indexes hold at least one usable voxel index.
+
+                A failed DICOM rasterization is recorded as ``np.NaN``, so such ROIs must
+                never be picked up by ``get_roi_names()``.
+
+                Args:
+                    indexes: Value stored in the ``indexes`` dict for one ROI.
+
+                Returns:
+                    bool: True if the indexes can be used to rebuild a mask.
+                """
+                if indexes is None:
+                    return False
+                try:
+                    if np.ndim(indexes) == 0:
+                        # Scalar value: np.NaN or a 0-d array.
+                        return bool(np.size(indexes)) and not np.isnan(indexes)
+                    return np.size(indexes) > 0
+                except (TypeError, ValueError):
+                    return False
+
+            def get_roi_names(self, exclude_invalid: bool = True) -> List[str]:
+                """Lists the names of the ROIs available in the scan.
+
+                Names are ordered by their integer key, which is the order used by
+                ``MEDscan.data.get_indexes_by_roi_name()`` (it resolves a name to a
+                positional index in ``roi_names``), so the two stay consistent.
+
+                Args:
+                    exclude_invalid (bool, optional): If True, skips the ROIs whose indexes
+                        are missing, NaN or empty. Defaults to True.
+
+                Returns:
+                    List[str]: Ordered list of the ROI names, without duplicates.
+
+                Examples:
+                    >>> medscan.data.ROI.get_roi_names()
+                    ['ET', 'ED', 'NET']
+                """
+                if not self.roi_names:
+                    return []
+
+                def sort_key(key):
+                    # Keys are stringified integers, so they must be sorted numerically
+                    # ('10' comes after '2') with a fallback for non-numeric keys.
+                    try:
+                        return (0, int(key))
+                    except (TypeError, ValueError):
+                        return (1, str(key))
+
+                roi_names = []
+                for key in sorted(self.roi_names.keys(), key=sort_key):
+                    roi_name = self.roi_names[key]
+                    if not isinstance(roi_name, str) or not roi_name.strip():
+                        continue
+                    # `self.indexes.get()` is used instead of `self.get_indexes()` since the
+                    # latter raises a KeyError for a name that has no indexes associated.
+                    if exclude_invalid and not self._indexes_are_valid(self.indexes.get(str(key))):
+                        continue
+                    if roi_name not in roi_names:
+                        roi_names += [roi_name]
+
+                return roi_names
+
+            def get_union_roi_name(self, exclude_invalid: bool = True) -> str:
+                """Builds the ROI name that unions every ROI available in the scan.
+
+                The returned name follows the MEDiml convention and can be passed to
+                ``MEDiml.processing.get_roi_from_indexes()``.
+
+                Args:
+                    exclude_invalid (bool, optional): If True, skips the ROIs whose indexes
+                        are missing, NaN or empty. Defaults to True.
+
+                Returns:
+                    str: The union of all the ROI names, empty if the scan has no valid ROI.
+
+                Examples:
+                    >>> medscan.data.ROI.get_union_roi_name()
+                    '{ET}+{ED}+{NET}'
+                """
+                return '+'.join(
+                    '{' + roi_name + '}' for roi_name in self.get_roi_names(exclude_invalid)
+                )
 
             def update_indexes(self, key, indexes):
                 try: 
@@ -1670,10 +1794,14 @@ class MEDscan(object):
                 """Extracts all ROI data from the given path for the given
                 patient ID and updates all class attributes with the new extracted data.
 
+                Note:
+                    The given path is searched recursively, and both the ".nii" and the
+                    ".nii.gz" extensions are supported.
+
                 Args:
                     roi_path(Union[Path, str]): Path where the ROI data is stored.
                     id(str): ID containing patient ID and the modality type, to identify the right file.
-                
+
                 Returns:
                     None.
                 """
@@ -1682,15 +1810,16 @@ class MEDscan(object):
                 self.nameSet = {}
                 self.nameSetInfo = {}
                 roi_index = 0
-                list_of_patients = os.listdir(roi_path)
 
-                for file in list_of_patients:
+                # Sorted so that the ROI indexes are stable from one run to the next.
+                list_of_files = sorted(Path(roi_path).rglob('*.nii*'))
+
+                for file in list_of_files:
                     # Load the patient's ROI nifti files :
-                    if file.startswith(id) and file.endswith('nii.gz') and 'ROI' in file.split("."):
-                        roi = nib.load(roi_path + "/" + file)
+                    if file.name.startswith(id) and is_nifti_file(file) and is_roi_file(file):
+                        roi = nib.load(file)
                         roi_data = self.convert_to_LPS(data=roi.get_fdata())
-                        roi_name = file[file.find("(")+1 : file.find(")")]
-                        name_set = file[file.find("_")+2 : file.find("(")]
+                        _, name_set, roi_name, _ = parse_nifti_name(file)
                         self.update_indexes(key=roi_index, indexes=np.nonzero(roi_data.flatten()))
                         self.update_name_set(key=roi_index, name_set=name_set)
                         self.update_roi_name(key=roi_index, roi_name=roi_name)

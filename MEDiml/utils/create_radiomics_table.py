@@ -28,7 +28,7 @@ def create_radiomics_table(radiomics_files_paths: List, image_space: str, log_fi
     """
     if log_file:
         # Setting up logging settings
-        logging.basicConfig(filename=log_file, level=logging.DEBUG)
+        logging.basicConfig(filename=log_file, level=logging.INFO)
     
     # INITIALIZATIONS OF RADIOMICS STRUCTURES
     n_files = len(radiomics_files_paths)
@@ -56,8 +56,8 @@ def create_radiomics_table(radiomics_files_paths: List, image_space: str, log_fi
             # IMAGE SPACE STRUCTURE --> .morph, .locInt, ...,  .texture
             image_space_struct = radiomics_struct[image_space]
             non_text_cell, text_cell = initialize_features_names(image_space_struct)
-        except:
-            pass
+        except Exception as e:
+            raise Exception(f"Error while initializing feature names: {e}")
 
     # CREATE TABLE DATA
     features_name_dict = {}

@@ -4,12 +4,15 @@ Installation
 Python installation
 -------------------
 
-The MEDiml package requires python 3.8 or more to be run. If you don't have it installed on your machine, follow \
-the instructions `here <https://github.com/MEDomicsLab/MEDiml/blob/main/python.md>`__.
+The MEDiml package requires python 3.8, 3.9 or 3.10 to be run. If you don't have it installed on your machine, follow \
+the instructions `here <https://github.com/MEDomicsLab/MEDiml-pkg/blob/main/python.md>`__.
 
 Install via pip
 ---------------
-``MEDiml`` is available on PyPi for installation via ``pip`` which allows you to install the package in one step ::
+``MEDiml`` is available on PyPi for installation via ``pip`` which allows you to install the package in one step 
+
+::
+
     pip install mediml
 
 Install from source
@@ -45,7 +48,7 @@ following the instructions `here <https://docs.anaconda.com/anaconda/install/ind
      
     python -m ipykernel install --user --name=mediml
 
-.. |conda-logo| image:: https://www.psych.mcgill.ca/labs/mogillab/anaconda2/pkgs/anaconda-navigator-1.4.3-py27_0/lib/python2.7/site-packages/anaconda_navigator/static/images/anaconda-icon-1024x1024.png
+.. |conda-logo| image:: https://avatars.githubusercontent.com/u/497012?s=280&v=4
     :width: 3%
     :target: https://docs.anaconda.com/anaconda/install/index.html
 
