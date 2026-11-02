@@ -1,6 +1,9 @@
-<div align="center">
+<img src="https://github.com/MEDomicsLab/MEDiml-app/blob/develop/resources/MEDimlLogo.png?raw=true" width="100" align="right" align="top" >
+<br />
 
-<img src="https://github.com/MEDomicsLab/MEDiml-pkg/blob/main/docs/figures/MEDimlLogo150.png?raw=true" style="width:150px;"/>
+# MEDiml: MEDical Image analysis with Machine Learning | The package
+
+<div>
 
 [![PyPI - Python Version](https://img.shields.io/badge/python-3.8%20|%203.9%20|%203.10-blue)](https://www.python.org/downloads/release/python-380/)
 [![PyPI - version](https://img.shields.io/pypi/v/mediml)](https://pypi.org/project/mediml/)
@@ -10,6 +13,14 @@
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MEDomicsLab/MEDiml-pkg/blob/main/notebooks/tutorial/DataManager-Tutorial.ipynb)
 
 </div>
+
+<p align="center">
+  <a href="https://mediml.readthedocs.io/en/latest/">📖&nbsp;Documentation</a>
+  &nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="https://mediml.app">🌐&nbsp;MEDiml.app</a>
+  &nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="https://github.com/MEDomicsLab/MEDiml-app/">🖥️&nbsp;MEDiml-app</a>
+</p>
 
 ## Table of Contents
   * [1. Introduction](#1-introduction)
