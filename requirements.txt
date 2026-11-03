@@ -1,4 +1,4 @@
-numpy
+numpy<2.0.0
 isort
 ipykernel
 ipywidgets
@@ -15,7 +15,7 @@ protobuf
 pycaret
 pydicom<2.0.0
 PyWavelets
-ray[default]
+ray[default]<2.55.0
 scikit_image
 scipy
 setuptools
