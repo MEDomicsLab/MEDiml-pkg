@@ -1,7 +1,4 @@
-<img src="https://github.com/MEDomicsLab/MEDiml-app/blob/develop/resources/MEDimlLogo.png?raw=true" width="100" align="right" align="top" >
-<br />
-
-# MEDiml: MEDical Image analysis with Machine Learning | The package
+# <img src="https://github.com/MEDomicsLab/MEDiml-app/blob/develop/resources/MEDimlLogo.png?raw=true" width="80" align="right" alt="MEDiml logo"> MEDiml: MEDical Image analysis with Machine Learning | The package
 
 <div>
 
