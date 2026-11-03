@@ -33,7 +33,7 @@
   * [7. Citation](#7-citation)
   * [8. Acknowledgement](#8-acknowledgement)
   * [9. Authors](#9-authors)
-  * [10. Statement](#10-statement)
+  * [10. License](#10-license)
 
 ## 1. Introduction
 MEDiml is an open-source Python package that can be used for processing multi-modal medical images (MRI, CT or PET) and for extracting their radiomic features. This package is meant to facilitate the processing of medical images and the subsequent computation of all types of radiomic features while maintaining the reproducibility of analyses. This package has been standardized with the [IBSI](https://theibsi.github.io/) norms.
@@ -207,26 +207,6 @@ MEDiml is developed by:
 * [MEDomicsLab](https://www.medomicslab.com/): Research laboratory at Université de Sherbrooke & McGill University.
 * [MEDomics](https://github.com/medomics/): MEDomics consortium.
 
-## 10. Statement
+## 10. License
 
-This package is part of https://github.com/medomics, a package providing research utility tools for developing precision medicine applications.
-
-```
-Copyright (C) 2024 MEDomics consortium
-
-GPL3 LICENSE SYNOPSIS
-
-Here's what the license entails:
-
-1. Anyone can copy, modify and distribute this software.
-2. You have to include the license and copyright notice with each and every distribution.
-3. You can use this software privately.
-4. You can use this software for commercial purposes.
-5. If you dare build your business solely from this code, you risk open-sourcing the whole code base.
-6. If you modify it, you have to indicate changes made to the code.
-7. Any modifications of this code base MUST be distributed with the same license, GPLv3.
-8. This software is provided without warranty.
-9. The software author or license can not be held liable for any damages inflicted by the software.
-```
-
-More information on about the [LICENSE can be found here](https://github.com/MEDomicsLab/MEDiml-pkg/blob/main/LICENSE.md)
+MEDiml-app is released under the [GNU General Public License v3.0](LICENSE).
