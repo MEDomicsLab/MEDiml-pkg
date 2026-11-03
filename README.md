@@ -52,6 +52,14 @@ You can easily install the ``MEDiml`` package from PyPI using:
 pip install MEDiml
 ```
 
+Or, with [uv](https://docs.astral.sh/uv/) (the fastest Python package and project manager):
+```
+uv pip install mediml                    # into your current environment
+uv add mediml                            # into a uv project
+uv tool install --python 3.10 mediml     # only the `radiomics` command, in its own environment
+```
+If your uv project uses Python 3.11 or newer, create one for Python 3.10 instead: `uv init --python 3.10`.
+
 For more installation options (Conda, Poetry...) check out the [installation documentation](https://mediml.readthedocs.io/en/latest/Installation.html).
 
 ## 3. Using MEDiml

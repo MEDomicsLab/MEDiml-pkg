@@ -15,6 +15,27 @@ Install via pip
 
     pip install mediml
 
+Install via uv
+--------------
+``MEDiml`` can also be installed with `uv <https://docs.astral.sh/uv/>`__ (the fastest Python package and project manager). Pick the command that fits your setup:
+
+* Into your current environment ::
+
+    uv pip install mediml
+
+* Into a uv project ::
+
+    uv add mediml
+
+* Only the ``radiomics`` command, in its own environment ::
+
+    uv tool install --python 3.10 mediml
+
+.. note::
+    MEDiml supports Python 3.10 at most. If your uv project uses a newer version, create one for Python 3.10 instead ::
+
+        uv init --python 3.10
+
 Install from source
 -------------------
 
