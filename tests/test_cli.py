@@ -2,11 +2,11 @@ from unittest.mock import patch
 
 import pytest
 
-from radiomics import build_parser, main
+from MEDiml.cli import build_parser, main
 
 
 def test_cli_defaults_to_niftis_and_forwards_arguments_to_batch_extractor():
-    with patch("radiomics._get_batch_extractor") as get_batch_extractor_mock:
+    with patch("MEDiml.cli._get_batch_extractor") as get_batch_extractor_mock:
         batch_extractor_mock = get_batch_extractor_mock.return_value
         instance = batch_extractor_mock.return_value
 
@@ -34,7 +34,7 @@ def test_cli_defaults_to_niftis_and_forwards_arguments_to_batch_extractor():
 
 
 def test_cli_forwards_dicom_selection_to_batch_extractor():
-    with patch("radiomics._get_batch_extractor") as get_batch_extractor_mock:
+    with patch("MEDiml.cli._get_batch_extractor") as get_batch_extractor_mock:
         batch_extractor_mock = get_batch_extractor_mock.return_value
         instance = batch_extractor_mock.return_value
 
@@ -53,7 +53,7 @@ def test_cli_forwards_dicom_selection_to_batch_extractor():
 
 
 def test_cli_forwards_optional_path_csv():
-    with patch("radiomics._get_batch_extractor") as get_batch_extractor_mock:
+    with patch("MEDiml.cli._get_batch_extractor") as get_batch_extractor_mock:
         batch_extractor_mock = get_batch_extractor_mock.return_value
 
         main([
