@@ -4,7 +4,7 @@
   </a>
 </p>
 
-<p align="center"><strong>A Python package for radiomics and dosiomics feature extraction.</strong></p>
+<p align="center"><strong>A Python package for radiomics analysis.</strong></p>
 
 <p align="center">
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/Python-3.8%20%7C%203.9%20%7C%203.10-blue" alt="Python 3.8, 3.9 and 3.10"></a>
