@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "mediml"
-version = "0.20.0"
+version = "0.20.1"
 description = "MEDiml is a Python package for processing and extracting features from medical images"
 authors = ["MEDomics Consortium <medomics.info@gmail.com>"]
 license = "GPL-3.0"
@@ -19,7 +19,7 @@ packages = [ {include = "MEDiml"} ]
 
 [tool.poetry.dependencies]
 python = ">=3.8.0,<3.11"
-numpy = "*"
+numpy = "<2.0.0"
 isort = "*"
 ipykernel = "*"
 ipywidgets = "*"
@@ -36,7 +36,7 @@ protobuf = "*"
 pycaret = "*"
 pydicom = "*"
 PyWavelets = "*"
-ray = { version = "*", extras = ["default"] }
+ray = { version = "<2.55.0", extras = ["default"] }
 scikit_image = "*"
 scipy = "*"
 setuptools = "*"
@@ -55,7 +55,7 @@ xgboost = "*"
 [tool.poetry.dev-dependencies]
 
 [tool.poetry.scripts]
-radiomics = "radiomics:main"
+radiomics = "MEDiml.cli:main"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
